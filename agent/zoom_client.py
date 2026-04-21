@@ -192,6 +192,53 @@ class ZoomLLMClient:
 
         return "".join(chunks)
 
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
+    ):
+        """Async generator yielding text chunks as they arrive from Zoom SSE."""
+        question = _build_question(messages, system_prompt, tools or [])
+        payload: dict[str, Any] = {
+            "agentId": self._agent_id,
+            "question": question,
+            "conversationId": "",
+        }
+        headers = {
+            "Authorization": self._token,
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+        }
+        url = self._base_url + STREAM_PATH
+        async with httpx.AsyncClient(timeout=120, verify=False) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    raise RuntimeError(
+                        f"Zoom API error {resp.status_code}: "
+                        f"{body.decode('utf-8', errors='replace')}"
+                    )
+                async for line in resp.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    status = obj.get("status", "")
+                    message = obj.get("message", "")
+                    if status == "pending" and message:
+                        yield message
+                    elif status == "success":
+                        return
+                    elif status == "error":
+                        error_msg = obj.get("errorMessage") or obj.get("message", "unknown error")
+                        raise RuntimeError(f"Zoom API error: {error_msg}")
+
     @staticmethod
     def _parse(raw_text: str) -> LLMResponse:
         tool_matches = _TOOL_CALL_RE.findall(raw_text)

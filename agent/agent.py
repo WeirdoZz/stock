@@ -39,7 +39,14 @@ def _build_llm_client():
         print(f"[agent] Backend: Anthropic  (model={settings.claude_model})")
         return _AnthropicAdapter(settings.anthropic_api_key, settings.claude_model)
 
-    raise RuntimeError(f"Unknown LLM_BACKEND={backend!r}. Use 'zoom' or 'anthropic'.")
+    elif backend == "aliyun":
+        aliyun_key = os.environ.get("ALIYUN_API_KEY", "")
+        if not aliyun_key:
+            raise RuntimeError("LLM_BACKEND=aliyun but ALIYUN_API_KEY is not set in .env")
+        print(f"[agent] Backend: Aliyun DashScope  (model=qwen-plus)")
+        return _AliyunAdapter(aliyun_key)
+
+    raise RuntimeError(f"Unknown LLM_BACKEND={backend!r}. Use 'zoom', 'anthropic', or 'aliyun'.")
 
 
 class _AnthropicAdapter:
@@ -58,6 +65,57 @@ class _AnthropicAdapter:
         content = [TextBlock(text=b.text) for b in resp.content if b.type == "text"]
         from agent.zoom_client import LLMResponse
         return LLMResponse(stop_reason="end_turn", content=content)
+
+    async def stream_complete(self, messages, system_prompt="", tools=None):
+        """Fallback: call complete() and yield the full text as one chunk."""
+        response = await self.complete(messages, system_prompt, tools or [])
+        for block in response.content:
+            if isinstance(block, TextBlock):
+                yield block.text
+
+
+class _AliyunAdapter:
+    """DashScope (Aliyun) adapter — OpenAI-compatible endpoint, qwen-plus model."""
+    _BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    _MODEL = "qwen-plus"
+
+    def __init__(self, api_key: str):
+        import httpx
+        from openai import AsyncOpenAI
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=self._BASE_URL,
+            http_client=httpx.AsyncClient(verify=False),
+        )
+
+    def _build_messages(self, messages: list[dict], system_prompt: str) -> list[dict]:
+        full: list[dict] = []
+        if system_prompt:
+            full.append({"role": "system", "content": system_prompt})
+        full.extend(messages)
+        return full
+
+    async def complete(self, messages, system_prompt="", tools=None):
+        resp = await self._client.chat.completions.create(
+            model=self._MODEL,
+            messages=self._build_messages(messages, system_prompt),
+            max_tokens=4096,
+        )
+        text = resp.choices[0].message.content or ""
+        from agent.zoom_client import LLMResponse
+        return LLMResponse(stop_reason="end_turn", content=[TextBlock(text=text)])
+
+    async def stream_complete(self, messages, system_prompt="", tools=None):
+        stream = await self._client.chat.completions.create(
+            model=self._MODEL,
+            messages=self._build_messages(messages, system_prompt),
+            max_tokens=4096,
+            stream=True,
+        )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
 
 
 # ── Tool runner (Python-side, no LLM involvement) ─────────────────────────────
@@ -135,7 +193,7 @@ def _run_all_tools(ticker: str, verbose: bool) -> dict:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-async def _run_query_async(ticker: str, verbose: bool = False) -> str:
+async def _run_query_async(ticker: str, verbose: bool = False, reply_language: str = "English") -> str:
     ticker = ticker.upper()
 
     # Step 1: Run all tools in Python
@@ -144,6 +202,7 @@ async def _run_query_async(ticker: str, verbose: bool = False) -> str:
     # Step 2: Build a single consolidated prompt with all data
     prompt = ANALYSIS_PROMPT.format(
         ticker=ticker,
+        reply_language=reply_language,
         news_json=json.dumps(tool_data["news"], indent=2),
         similar_json=json.dumps(tool_data["similar"], indent=2),
         prices_json=json.dumps(tool_data["prices"], indent=2),
@@ -169,3 +228,29 @@ async def _run_query_async(ticker: str, verbose: bool = False) -> str:
 
 def run_query(ticker: str, verbose: bool = False) -> str:
     return asyncio.run(_run_query_async(ticker, verbose))
+
+
+async def run_query_stream(ticker: str, verbose: bool = False, reply_language: str = "English"):
+    """Async generator yielding status updates and LLM chunks for streaming."""
+    ticker = ticker.upper()
+    yield {"type": "status", "content": "Collecting market data..."}
+    loop = asyncio.get_event_loop()
+    tool_data = await loop.run_in_executor(None, _run_all_tools, ticker, verbose)
+    yield {"type": "status", "content": "Analyzing with AI..."}
+    prompt = ANALYSIS_PROMPT.format(
+        ticker=ticker,
+        reply_language=reply_language,
+        news_json=json.dumps(tool_data["news"], indent=2),
+        similar_json=json.dumps(tool_data["similar"], indent=2),
+        prices_json=json.dumps(tool_data["prices"], indent=2),
+        corr_json=json.dumps(tool_data["correlation_stats"], indent=2),
+        pcr_json=json.dumps(tool_data["put_call_ratio"], indent=2),
+        insider_json=json.dumps(tool_data["insider_transactions"], indent=2),
+    )
+    llm = _build_llm_client()
+    async for chunk in llm.stream_complete(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt="You are a rigorous stock trend analyst. Write a structured analysis based solely on the data provided. Never fabricate data. Always reply in the same language the user used.",
+    ):
+        yield {"type": "chunk", "content": chunk}
+    yield {"type": "done", "content": ""}
