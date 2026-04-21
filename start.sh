@@ -9,7 +9,7 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-8000}"
+PORT="${PORT:-9999}"
 WORKERS="${WORKERS:-1}"
 VENV_DIR=".venv"
 
@@ -62,7 +62,7 @@ info "Virtualenv: $VENV_PYTHON ($($VENV_PYTHON --version))"
 
 # ── Install dependencies (only when pyproject.toml changes) ──────────────────
 MARKER="$VENV_DIR/.deps_installed"
-CURRENT_HASH=$(md5sum pyproject.toml 2>/dev/null | cut -d' ' -f1)
+CURRENT_HASH=$(md5sum pyproject.toml 2>/dev/null | cut -d' ' -f1 || echo "")
 SAVED_HASH=$(cat "$MARKER" 2>/dev/null || echo "")
 if [ "$CURRENT_HASH" != "$SAVED_HASH" ]; then
     info "Installing dependencies..."
@@ -104,11 +104,11 @@ fi
 
 # ── Check required keys ───────────────────────────────────────────────────────
 check_env() {
-    val=$(grep -E "^$1=" .env | cut -d= -f2- | tr -d '[:space:]')
+    val=$(grep -E "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' || echo "")
     [ -z "$val" ] && warn ".env: $1 is not set"
 }
 
-BACKEND=$(grep -E "^LLM_BACKEND=" .env | cut -d= -f2- | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+BACKEND=$(grep -E "^LLM_BACKEND=" .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || echo "")
 case "$BACKEND" in
     aliyun)   check_env ALIYUN_API_KEY ;;
     anthropic) check_env ANTHROPIC_API_KEY ;;
