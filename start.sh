@@ -52,12 +52,17 @@ else
     $PYTHON -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
 fi
-info "Virtualenv: $(which python) ($( python --version))"
+
+VENV_PYTHON="$VENV_DIR/bin/python3"
+VENV_PIP="$VENV_DIR/bin/pip"
+[ ! -f "$VENV_PYTHON" ] && VENV_PYTHON="$VENV_DIR/bin/python"
+[ ! -f "$VENV_PIP" ]    && VENV_PIP="$VENV_DIR/bin/pip3"
+info "Virtualenv: $VENV_PYTHON ($($VENV_PYTHON --version))"
 
 # ── Install / upgrade dependencies ───────────────────────────────────────────
 info "Installing dependencies..."
-pip install --upgrade pip -q
-pip install \
+$VENV_PIP install --upgrade pip -q
+$VENV_PIP install \
     "anthropic>=0.40.0" \
     "yfinance>=0.2.40" \
     "sqlalchemy>=2.0" \
@@ -110,7 +115,7 @@ info "Starting Stock Analysis API on http://${HOST}:${PORT}"
 info "Press Ctrl+C to stop."
 echo ""
 
-exec uvicorn api.main:app \
+exec "$VENV_DIR/bin/uvicorn" api.main:app \
     --host "$HOST" \
     --port "$PORT" \
     --workers "$WORKERS"
