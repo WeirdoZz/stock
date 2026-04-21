@@ -61,7 +61,9 @@ info "Virtualenv: $VENV_PYTHON ($($VENV_PYTHON --version))"
 
 # ── Install dependencies (only when pyproject.toml changes) ──────────────────
 MARKER="$VENV_DIR/.deps_installed"
-if [ ! -f "$MARKER" ] || [ "pyproject.toml" -nt "$MARKER" ]; then
+CURRENT_HASH=$(md5sum pyproject.toml 2>/dev/null | cut -d' ' -f1)
+SAVED_HASH=$(cat "$MARKER" 2>/dev/null || echo "")
+if [ "$CURRENT_HASH" != "$SAVED_HASH" ]; then
     info "Installing dependencies..."
     $VENV_PIP install --upgrade pip -q
     $VENV_PIP install \
@@ -81,7 +83,7 @@ if [ ! -f "$MARKER" ] || [ "pyproject.toml" -nt "$MARKER" ]; then
         "uvicorn[standard]>=0.30.0" \
         "sse-starlette>=1.8.0" \
         -q
-    touch "$MARKER"
+    echo "$CURRENT_HASH" > "$MARKER"
     info "Dependencies installed."
 else
     info "Dependencies up to date, skipping install."
