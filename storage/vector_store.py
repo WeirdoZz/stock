@@ -36,14 +36,23 @@ def _get_embedder() -> SentenceTransformer:
     return _embedder
 
 
+def _build_embed_text(article: dict) -> str:
+    """Combine headline + summary for richer semantic embedding."""
+    headline = article.get("headline", "").strip()
+    summary = (article.get("summary") or "").strip()
+    if summary and summary != headline:
+        return f"{headline}. {summary}"
+    return headline
+
+
 def embed_articles(articles: list[dict]) -> None:
-    """Embed a list of article dicts (id, ticker, headline, published_at, sentiment_label)."""
+    """Embed a list of article dicts using headline + summary for richer semantics."""
     if not articles:
         return
     collection = _get_collection()
     embedder = _get_embedder()
 
-    texts = [a["headline"] for a in articles]
+    texts = [_build_embed_text(a) for a in articles]
     ids = [a["id"] for a in articles]
     metadatas = [
         {
@@ -51,6 +60,7 @@ def embed_articles(articles: list[dict]) -> None:
             "published_at": str(a["published_at"]),
             "sentiment_label": a.get("sentiment_label", ""),
             "sentiment_score": float(a.get("sentiment_score") or 0.0),
+            "headline": a.get("headline", ""),   # store original headline separately
         }
         for a in articles
     ]

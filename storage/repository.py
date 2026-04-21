@@ -45,6 +45,7 @@ def get_unembedded_articles(ticker: str | None = None) -> list[dict]:
                 "id": r.id,
                 "ticker": r.ticker,
                 "headline": r.headline,
+                "summary": r.summary,
                 "published_at": r.published_at,
                 "sentiment_label": r.sentiment_label,
                 "sentiment_score": r.sentiment_score,
