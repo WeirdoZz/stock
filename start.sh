@@ -59,27 +59,33 @@ VENV_PIP="$VENV_DIR/bin/pip"
 [ ! -f "$VENV_PIP" ]    && VENV_PIP="$VENV_DIR/bin/pip3"
 info "Virtualenv: $VENV_PYTHON ($($VENV_PYTHON --version))"
 
-# ── Install / upgrade dependencies ───────────────────────────────────────────
-info "Installing dependencies..."
-$VENV_PIP install --upgrade pip -q
-$VENV_PIP install \
-    "anthropic>=0.40.0" \
-    "yfinance>=0.2.40" \
-    "sqlalchemy>=2.0" \
-    "chromadb>=0.5.0" \
-    "sentence-transformers>=3.0" \
-    "click>=8.1" \
-    "python-dotenv>=1.0" \
-    "pydantic-settings>=2.0" \
-    "requests>=2.31" \
-    "apscheduler>=3.10" \
-    "pandas>=2.0" \
-    "openai>=1.0.0" \
-    "fastapi>=0.111.0" \
-    "uvicorn[standard]>=0.30.0" \
-    "sse-starlette>=1.8.0" \
-    -q
-info "Dependencies installed."
+# ── Install dependencies (only when pyproject.toml changes) ──────────────────
+MARKER="$VENV_DIR/.deps_installed"
+if [ ! -f "$MARKER" ] || [ "pyproject.toml" -nt "$MARKER" ]; then
+    info "Installing dependencies..."
+    $VENV_PIP install --upgrade pip -q
+    $VENV_PIP install \
+        "anthropic>=0.40.0" \
+        "yfinance>=0.2.40" \
+        "sqlalchemy>=2.0" \
+        "chromadb>=0.5.0" \
+        "sentence-transformers>=3.0" \
+        "click>=8.1" \
+        "python-dotenv>=1.0" \
+        "pydantic-settings>=2.0" \
+        "requests>=2.31" \
+        "apscheduler>=3.10" \
+        "pandas>=2.0" \
+        "openai>=1.0.0" \
+        "fastapi>=0.111.0" \
+        "uvicorn[standard]>=0.30.0" \
+        "sse-starlette>=1.8.0" \
+        -q
+    touch "$MARKER"
+    info "Dependencies installed."
+else
+    info "Dependencies up to date, skipping install."
+fi
 
 # ── .env check ───────────────────────────────────────────────────────────────
 if [ ! -f ".env" ]; then
