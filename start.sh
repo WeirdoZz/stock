@@ -38,8 +38,9 @@ else
 
     # Install system packages if needed
     if command -v apt-get &>/dev/null; then
+        PY_VER=$($PYTHON -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
         MISSING=""
-        for pkg in python3-venv python3-dev build-essential; do
+        for pkg in "python${PY_VER}-venv" "python${PY_VER}-dev" build-essential; do
             dpkg -s "$pkg" &>/dev/null || MISSING="$MISSING $pkg"
         done
         if [ -n "$MISSING" ]; then
