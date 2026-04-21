@@ -2,8 +2,6 @@ ANALYSIS_PROMPT = """\
 You are a rigorous stock trend analyst. Analyze the following pre-collected data for {ticker} \
 and write a structured trend inference. Use ONLY the data provided — never fabricate.
 
-IMPORTANT: Write your entire response in {reply_language}.
-
 ---
 
 ## CURRENT NEWS (past 72 hours)
@@ -72,4 +70,7 @@ Write your analysis in this exact format:
 - Conflicting signals across sources
 - Data gaps
 - "This is pattern analysis only, NOT financial advice."
+
+---
+CRITICAL INSTRUCTION: The user's question was written in {reply_language}. You MUST write your entire analysis in {reply_language}. Do not use any other language.
 """

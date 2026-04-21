@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     claude_model: str = "claude-sonnet-4-6"
     embedding_model: str = "all-MiniLM-L6-v2"
+    log_level: str = "INFO"
+    sync_cron: str = "0 18 * * 1-5"
 
     class Config:
         env_file = BASE_DIR / ".env"

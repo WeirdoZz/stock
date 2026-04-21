@@ -93,7 +93,7 @@ async def chat(req: ChatRequest):
                 logger.debug("[chat] starting stream_complete (follow-up)")
                 async for chunk in llm.stream_complete(
                     messages=[{"role": "user", "content": prompt}],
-                    system_prompt="You are a rigorous stock trend analyst. Always reply in the same language the user used.",
+                    system_prompt="You are a rigorous stock trend analyst.",
                 ):
                     logger.debug("[chat] follow-up chunk len=%d", len(chunk))
                     full_response += chunk

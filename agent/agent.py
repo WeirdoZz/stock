@@ -250,7 +250,7 @@ async def run_query_stream(ticker: str, verbose: bool = False, reply_language: s
     llm = _build_llm_client()
     async for chunk in llm.stream_complete(
         messages=[{"role": "user", "content": prompt}],
-        system_prompt="You are a rigorous stock trend analyst. Write a structured analysis based solely on the data provided. Never fabricate data. Always reply in the same language the user used.",
+        system_prompt="You are a rigorous stock trend analyst. Write a structured analysis based solely on the data provided. Never fabricate data.",
     ):
         yield {"type": "chunk", "content": chunk}
     yield {"type": "done", "content": ""}
