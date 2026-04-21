@@ -17,39 +17,42 @@ VENV_DIR=".venv"
 cd "$(dirname "$0")"
 info "Working directory: $(pwd)"
 
-# ── Python 3.11+ check ────────────────────────────────────────────────────────
-PYTHON=""
-for cmd in python3.13 python3.12 python3.11 python3; do
-    if command -v "$cmd" &>/dev/null; then
-        VER=$("$cmd" -c "import sys; print(sys.version_info[:2])")
-        if "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" 2>/dev/null; then
-            PYTHON="$cmd"
-            break
+# ── Virtual environment ───────────────────────────────────────────────────────
+if [ -d "$VENV_DIR" ]; then
+    # venv already exists — use it directly, no system Python check needed
+    info "Found existing venv, activating..."
+    source "$VENV_DIR/bin/activate"
+else
+    # Need to create venv — find a suitable system Python 3.11+
+    PYTHON=""
+    for cmd in python3.13 python3.12 python3.11 python3; do
+        if command -v "$cmd" &>/dev/null; then
+            if "$cmd" -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" 2>/dev/null; then
+                PYTHON="$cmd"
+                break
+            fi
+        fi
+    done
+    [ -z "$PYTHON" ] && error "Python 3.11+ not found. Install with: sudo apt install python3.11"
+    info "Using Python: $PYTHON ($($PYTHON --version))"
+
+    # Install system packages if needed
+    if command -v apt-get &>/dev/null; then
+        MISSING=""
+        for pkg in python3-venv python3-dev build-essential; do
+            dpkg -s "$pkg" &>/dev/null || MISSING="$MISSING $pkg"
+        done
+        if [ -n "$MISSING" ]; then
+            warn "Installing missing system packages:$MISSING"
+            sudo apt-get install -y $MISSING
         fi
     fi
-done
-[ -z "$PYTHON" ] && error "Python 3.11+ not found. Install with: sudo apt install python3.11"
-info "Using Python: $PYTHON ($($PYTHON --version))"
 
-# ── System packages (Ubuntu) ──────────────────────────────────────────────────
-if command -v apt-get &>/dev/null; then
-    MISSING=""
-    for pkg in python3-venv python3-dev build-essential; do
-        dpkg -s "$pkg" &>/dev/null || MISSING="$MISSING $pkg"
-    done
-    if [ -n "$MISSING" ]; then
-        warn "Installing missing system packages:$MISSING"
-        sudo apt-get install -y $MISSING
-    fi
-fi
-
-# ── Virtual environment ───────────────────────────────────────────────────────
-if [ ! -d "$VENV_DIR" ]; then
     info "Creating virtual environment..."
     $PYTHON -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
 fi
-source "$VENV_DIR/bin/activate"
-info "Virtualenv: $(which python)"
+info "Virtualenv: $(which python) ($( python --version))"
 
 # ── Install / upgrade dependencies ───────────────────────────────────────────
 info "Installing dependencies..."
