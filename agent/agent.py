@@ -15,7 +15,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 from agent.zoom_client import ZoomLLMClient, TextBlock
 from agent.tool_executor import execute_tool
-from agent.prompts import ANALYSIS_PROMPT
+from agent.prompts import ANALYSIS_PROMPT, COMPARISON_PROMPT
 from config.settings import settings
 
 
@@ -191,6 +191,47 @@ def _run_all_tools(ticker: str, verbose: bool) -> dict:
     return results
 
 
+# ── Chart data helpers ────────────────────────────────────────────────────────
+
+def _build_chart_data(ticker: str, tool_data: dict) -> dict:
+    """Build single-ticker chart payload (prices + daily sentiment)."""
+    from storage.repository import get_daily_sentiment
+    prices = [
+        {"date": b["timestamp"][:10], "close": b["close"]}
+        for b in tool_data["prices"]["bars"]
+    ]
+    sentiment = get_daily_sentiment(ticker, days=7)
+    return {
+        "mode": "single",
+        "tickers": [ticker],
+        "prices": {ticker: prices},
+        "sentiment": {ticker: sentiment},
+    }
+
+
+def _build_comparison_chart_data(ticker_a: str, ticker_b: str,
+                                  data_a: dict, data_b: dict) -> dict:
+    """Build comparison chart payload (normalized prices for both tickers)."""
+    from storage.repository import get_daily_sentiment
+
+    def prices_for(data):
+        return [{"date": b["timestamp"][:10], "close": b["close"]}
+                for b in data["prices"]["bars"]]
+
+    return {
+        "mode": "comparison",
+        "tickers": [ticker_a, ticker_b],
+        "prices": {
+            ticker_a: prices_for(data_a),
+            ticker_b: prices_for(data_b),
+        },
+        "sentiment": {
+            ticker_a: get_daily_sentiment(ticker_a, days=7),
+            ticker_b: get_daily_sentiment(ticker_b, days=7),
+        },
+    }
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 async def _run_query_async(ticker: str, verbose: bool = False, reply_language: str = "English") -> str:
@@ -230,6 +271,58 @@ def run_query(ticker: str, verbose: bool = False) -> str:
     return asyncio.run(_run_query_async(ticker, verbose))
 
 
+async def run_comparison_stream(ticker_a: str, ticker_b: str,
+                                 verbose: bool = False, reply_language: str = "English"):
+    """Async generator: collect data for two tickers in parallel, stream LLM comparison."""
+    ticker_a, ticker_b = ticker_a.upper(), ticker_b.upper()
+
+    from storage.repository import get_latest_price_date
+    for t in [ticker_a, ticker_b]:
+        if get_latest_price_date(t) is None:
+            yield {
+                "type": "error",
+                "content": (
+                    f"{t} 尚无本地数据，请先同步。\n"
+                    f"点击侧边栏的 ⟳ 按钮，或调用 POST /api/sync/{t}"
+                ),
+            }
+            return
+
+    yield {"type": "status", "content": f"Collecting data for {ticker_a} and {ticker_b}..."}
+    loop = asyncio.get_event_loop()
+    data_a, data_b = await asyncio.gather(
+        loop.run_in_executor(None, _run_all_tools, ticker_a, verbose),
+        loop.run_in_executor(None, _run_all_tools, ticker_b, verbose),
+    )
+
+    chart_data = _build_comparison_chart_data(ticker_a, ticker_b, data_a, data_b)
+
+    yield {"type": "status", "content": "Comparing with AI..."}
+    prompt = COMPARISON_PROMPT.format(
+        ticker_a=ticker_a,
+        ticker_b=ticker_b,
+        reply_language=reply_language,
+        news_a_json=json.dumps(data_a["news"], indent=2),
+        prices_a_json=json.dumps(data_a["prices"], indent=2),
+        corr_a_json=json.dumps(data_a["correlation_stats"], indent=2),
+        pcr_a_json=json.dumps(data_a["put_call_ratio"], indent=2),
+        insider_a_json=json.dumps(data_a["insider_transactions"], indent=2),
+        news_b_json=json.dumps(data_b["news"], indent=2),
+        prices_b_json=json.dumps(data_b["prices"], indent=2),
+        corr_b_json=json.dumps(data_b["correlation_stats"], indent=2),
+        pcr_b_json=json.dumps(data_b["put_call_ratio"], indent=2),
+        insider_b_json=json.dumps(data_b["insider_transactions"], indent=2),
+    )
+    llm = _build_llm_client()
+    async for chunk in llm.stream_complete(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt="You are a rigorous stock analyst making side-by-side comparisons. Never fabricate data.",
+    ):
+        yield {"type": "chunk", "content": chunk}
+    yield {"type": "chart", "content": json.dumps(chart_data)}
+    yield {"type": "done", "content": ""}
+
+
 async def run_query_stream(ticker: str, verbose: bool = False, reply_language: str = "English"):
     """Async generator yielding status updates and LLM chunks for streaming."""
     ticker = ticker.upper()
@@ -249,6 +342,7 @@ async def run_query_stream(ticker: str, verbose: bool = False, reply_language: s
     yield {"type": "status", "content": "Collecting market data..."}
     loop = asyncio.get_event_loop()
     tool_data = await loop.run_in_executor(None, _run_all_tools, ticker, verbose)
+    chart_data = _build_chart_data(ticker, tool_data)
     yield {"type": "status", "content": "Analyzing with AI..."}
     prompt = ANALYSIS_PROMPT.format(
         ticker=ticker,
@@ -266,4 +360,5 @@ async def run_query_stream(ticker: str, verbose: bool = False, reply_language: s
         system_prompt="You are a rigorous stock trend analyst. Write a structured analysis based solely on the data provided. Never fabricate data.",
     ):
         yield {"type": "chunk", "content": chunk}
+    yield {"type": "chart", "content": json.dumps(chart_data)}
     yield {"type": "done", "content": ""}

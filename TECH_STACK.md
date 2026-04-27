@@ -17,6 +17,7 @@
 | LLM 接入 | Zoom AI / Anthropic / Aliyun DashScope | — |
 | 数据采集 | yfinance, Alpha Vantage API, Finnhub API | — |
 | 前端 | 纯 HTML + Vanilla JS | 无构建步骤 |
+| 图表 | Chart.js 4 | CDN，无 npm |
 | 定时任务 | APScheduler | ≥ 3.10 |
 
 ---
@@ -116,11 +117,18 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 ### 纯 HTML + Vanilla JS（无框架、无构建）
 - **文件：** `frontend/index.html`（单文件）
 - **Markdown 渲染：** `marked.js`（CDN）
+- **图表渲染：** `Chart.js 4`（CDN，`chart.umd.min.js`）— 无需 npm/构建
 - **流式接收：** `fetch()` + `ReadableStream`（非 `EventSource`，因为 SSE over POST 不受原生 API 支持）
 - **侧边栏功能：**
   - 启动时并行请求 `/api/status/{ticker}` 和 `/api/sync/status/{ticker}`
   - 显示最后同步日期，超过 1 天标红
   - ⟳ 按钮触发 sync，轮询进度，完成后自动刷新日期
+
+### Chart.js 使用模式
+- 每次 `type: "chart"` SSE 事件到达时，调用 `renderCharts(msgEl, chartData)` 动态创建 `<canvas>` 并初始化 Chart 实例
+- 图表容器挂在 `.msg` 元素上（而非 `.bubble`），避免被 `done` 事件的 `innerHTML` 重写覆盖
+- **单 ticker：** 14 天收盘价折线图 + 7 天情感柱状图（正绿负红）
+- **对比模式：** 归一化百分比折线对比图 + 双 ticker 情感柱状对比图
 
 ---
 

@@ -47,6 +47,22 @@ def _extract_ticker(text: str, ticker_list: list):
     return None
 
 
+def _extract_comparison_tickers(text: str, ticker_list: list) -> tuple[str, str] | None:
+    """Return (ticker_a, ticker_b) if the message references two distinct tracked tickers."""
+    found: list[str] = []
+    for alias, ticker in _ALIASES.items():
+        if alias in text and ticker in ticker_list and ticker not in found:
+            found.append(ticker)
+    for match in _TICKER_RE.finditer(text):
+        t = match.group(1)
+        if t in ticker_list and t not in found:
+            found.append(t)
+    if len(found) >= 2:
+        logger.debug("[chat] comparison tickers: %s vs %s", found[0], found[1])
+        return found[0], found[1]
+    return None
+
+
 @router.post("/api/chat")
 async def chat(req: ChatRequest):
     ticker_list = settings.ticker_list
@@ -58,6 +74,31 @@ async def chat(req: ChatRequest):
     async def event_stream():
         yield {"data": json.dumps({"type": "session", "content": "", "session_id": session_id})}
 
+        lang = _detect_language(req.message)
+
+        # ── Comparison path: two tickers detected ────────────────────────────
+        comp = _extract_comparison_tickers(req.message, ticker_list)
+        if comp:
+            ticker_a, ticker_b = comp
+            entry.messages.append({"role": "user", "content": req.message})
+            sessions.trim_messages(entry)
+            try:
+                from agent.agent import run_comparison_stream
+                full_response = ""
+                async for event in run_comparison_stream(ticker_a, ticker_b, reply_language=lang):
+                    logger.debug("[chat] comparison event type=%s", event["type"])
+                    yield {"data": json.dumps(event)}
+                    if event["type"] == "chunk":
+                        full_response += event["content"]
+                entry.messages.append({"role": "assistant", "content": full_response})
+                entry.last_ticker = None  # no single active ticker after comparison
+                sessions.save(session_id, entry)
+            except Exception as exc:
+                logger.error("[chat] comparison exception: %s\n%s", exc, traceback.format_exc())
+                yield {"data": json.dumps({"type": "error", "content": f"Error: {exc}"})}
+            return
+
+        # ── Single ticker path ───────────────────────────────────────────────
         ticker = _extract_ticker(req.message, ticker_list)
         is_followup = False
         logger.debug("[chat] extracted ticker=%s", ticker)
@@ -104,7 +145,6 @@ async def chat(req: ChatRequest):
             else:
                 logger.debug("[chat] full pipeline path for ticker=%s", ticker)
                 from agent.agent import run_query_stream
-                lang = _detect_language(req.message)
                 logger.debug("[chat] reply_language=%s", lang)
                 full_response = ""
                 async for event in run_query_stream(ticker, reply_language=lang):

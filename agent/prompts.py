@@ -74,3 +74,103 @@ Write your analysis in this exact format:
 ---
 CRITICAL INSTRUCTION: The user's question was written in {reply_language}. You MUST write your entire analysis in {reply_language}. Do not use any other language.
 """
+
+COMPARISON_PROMPT = """\
+You are a rigorous stock analyst. Compare {ticker_a} and {ticker_b} side-by-side using ONLY \
+the data provided — never fabricate.
+
+---
+
+## {ticker_a} — NEWS (past 72h)
+```json
+{news_a_json}
+```
+
+## {ticker_a} — PRICE HISTORY (14d)
+```json
+{prices_a_json}
+```
+
+## {ticker_a} — CORRELATION STATS
+```json
+{corr_a_json}
+```
+
+## {ticker_a} — PUT-CALL RATIO
+```json
+{pcr_a_json}
+```
+
+## {ticker_a} — INSIDER TRANSACTIONS
+```json
+{insider_a_json}
+```
+
+---
+
+## {ticker_b} — NEWS (past 72h)
+```json
+{news_b_json}
+```
+
+## {ticker_b} — PRICE HISTORY (14d)
+```json
+{prices_b_json}
+```
+
+## {ticker_b} — CORRELATION STATS
+```json
+{corr_b_json}
+```
+
+## {ticker_b} — PUT-CALL RATIO
+```json
+{pcr_b_json}
+```
+
+## {ticker_b} — INSIDER TRANSACTIONS
+```json
+{insider_b_json}
+```
+
+---
+
+Write your comparison in this exact format:
+
+**{ticker_a} vs {ticker_b} — Head-to-Head Analysis**
+
+**Price Momentum**
+| Metric | {ticker_a} | {ticker_b} |
+|---|---|---|
+| 14-day trend | ... | ... |
+| Most recent close | ... | ... |
+| 14-day % change | ... | ... |
+
+**News Sentiment**
+- {ticker_a}: dominant theme and overall tone
+- {ticker_b}: dominant theme and overall tone
+
+**Options Signal (PCR)**
+- {ticker_a}: PCR value → BULLISH / NEUTRAL / BEARISH
+- {ticker_b}: PCR value → BULLISH / NEUTRAL / BEARISH
+
+**Insider Activity**
+- {ticker_a}: net buying or selling
+- {ticker_b}: net buying or selling
+
+**Historical Base Rate**
+- {ticker_a}: X% of similar past events → up/down (state sample count)
+- {ticker_b}: X% of similar past events → up/down (state sample count)
+
+**Head-to-Head Verdict**
+- Winner: **{ticker_a}** or **{ticker_b}** (or **NEUTRAL** if too close to call)
+- Reasoning: one paragraph synthesizing all signals
+- Confidence: High / Medium / Low
+
+**Caveats**
+- Conflicting signals, data gaps
+- "This is pattern analysis only, NOT financial advice."
+
+---
+CRITICAL INSTRUCTION: Reply entirely in {reply_language}.
+"""

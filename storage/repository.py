@@ -148,6 +148,30 @@ def get_latest_news_date(ticker: str) -> datetime | None:
         return result
 
 
+def get_daily_sentiment(ticker: str, days: int = 7) -> list[dict]:
+    """Return daily aggregated sentiment scores for the past N days."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    with get_session() as session:
+        rows = (
+            session.query(NewsArticle)
+            .filter(
+                NewsArticle.ticker == ticker.upper(),
+                NewsArticle.published_at >= cutoff,
+                NewsArticle.sentiment_score.isnot(None),
+            )
+            .order_by(NewsArticle.published_at.asc())
+            .all()
+        )
+    from collections import defaultdict
+    by_day: dict[str, list[float]] = defaultdict(list)
+    for r in rows:
+        by_day[r.published_at.date().isoformat()].append(r.sentiment_score)
+    return [
+        {"date": d, "avg_score": round(sum(v) / len(v), 3), "count": len(v)}
+        for d, v in sorted(by_day.items())
+    ]
+
+
 def get_news_article_by_ids(ids: list[str]) -> list[dict]:
     with get_session() as session:
         rows = session.query(NewsArticle).filter(NewsArticle.id.in_(ids)).all()

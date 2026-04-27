@@ -142,8 +142,11 @@ analysis/embedder.py → embed_pending()                      → ChromaDB
 | Function | Signature | Description |
 |---|---|---|
 | `run_query` | `(ticker: str, verbose: bool) → str` | Sync wrapper for CLI use. Calls `asyncio.run()`. Do NOT call from async context. |
-| `run_query_stream` | `async gen (ticker, verbose, reply_language)` | Async generator for API streaming. Yields `{"type": "status/chunk/done/error", "content": str}`. **Guards against missing data:** if `get_latest_price_date(ticker)` is `None`, yields `type=error` and returns immediately — no LLM call is made. |
+| `run_query_stream` | `async gen (ticker, verbose, reply_language)` | Single-ticker async generator. Yields `status` → `chunks` → `chart` → `done`. Guards against missing data: yields `error` and returns if no price data exists. |
+| `run_comparison_stream` | `async gen (ticker_a, ticker_b, verbose, reply_language)` | Two-ticker comparison. Collects both tickers' data in parallel via `asyncio.gather`, then streams `COMPARISON_PROMPT` to LLM. Yields same event types as `run_query_stream`. |
 | `_run_all_tools` | `(ticker, verbose) → dict` | Sync. Runs all 6 data tools, returns dict with keys: `news`, `similar`, `prices`, `correlation_stats`, `put_call_ratio`, `insider_transactions`. |
+| `_build_chart_data` | `(ticker, tool_data) → dict` | Builds single-ticker chart payload: `{mode: "single", tickers, prices: {ticker: [{date, close}]}, sentiment: {ticker: [{date, avg_score, count}]}}`. Calls `get_daily_sentiment()` for 7-day sentiment. |
+| `_build_comparison_chart_data` | `(ticker_a, ticker_b, data_a, data_b) → dict` | Builds comparison chart payload: `{mode: "comparison", tickers, prices: {...}, sentiment: {...}}`. Frontend normalizes prices to % change from day 1. |
 | `_build_llm_client` | `() → adapter` | Factory. Reads `LLM_BACKEND` env var, returns `ZoomLLMClient`, `_AnthropicAdapter`, or `_AliyunAdapter`. |
 
 **LLM Adapters (private):**
@@ -202,14 +205,16 @@ Sessions expire after 1 hour idle (`TTL_SECONDS = 3600`).
 
 ### `api/routes/chat.py`
 
-**Ticker extraction (2-stage):**
-1. Chinese alias map: `{"苹果": "AAPL", "英伟达": "NVDA", ...}`
-2. Regex `\b([A-Z]{1,5})\b` with `re.ASCII` flag (critical — without `re.ASCII`, Chinese chars count as `\w` and break `\b` boundaries)
-3. Session fallback: reuse `last_ticker` if no ticker found → marks as follow-up
+**Ticker extraction (3-stage, comparison checked first):**
+1. `_extract_comparison_tickers()`: scan for 2 distinct tracked tickers → if found, route to `run_comparison_stream()` immediately, skip single-ticker logic
+2. Chinese alias map: `{"苹果": "AAPL", "英伟达": "NVDA", ...}`
+3. Regex `\b([A-Z]{1,5})\b` with `re.ASCII` flag (critical — without `re.ASCII`, Chinese chars count as `\w` and break `\b` boundaries)
+4. Session fallback: reuse `last_ticker` if no ticker found → marks as follow-up
 
-**Follow-up vs full pipeline:**
-- Same session + same ticker reused → skip tool collection, send lightweight context prompt
-- New ticker detected → full `run_query_stream()` pipeline
+**Routing logic (in priority order):**
+- 2 tickers detected → `run_comparison_stream()`; `entry.last_ticker` set to `None`
+- Same session + same ticker reused → lightweight context prompt (no tool re-collection)
+- New single ticker → full `run_query_stream()` pipeline
 
 **Language detection:** `_detect_language()` checks for CJK characters (`\u4e00-\u9fff`) in message.
 
@@ -253,7 +258,8 @@ All events are JSON-encoded in `data:` field:
 | `session` | First event always | `""` — `session_id` field carries the ID |
 | `status` | During pipeline | Human-readable progress string |
 | `chunk` | During LLM streaming | Partial text to append to bubble |
-| `done` | Final event | `""` — trigger markdown render |
+| `chart` | After last chunk, before `done` | JSON string — chart payload `{mode, tickers, prices, sentiment}`; frontend calls `renderCharts()` |
+| `done` | Final event | `""` — triggers final markdown re-render |
 | `error` | On any failure | Error message string |
 
 ### `ChatRequest` body
@@ -379,6 +385,12 @@ Each ticker row shows: `[ticker name] [last sync date] [⟳ sync button]`.
 - Date is fetched from `GET /api/status/{ticker}` on page load; red if `days_stale >= 1`, "未同步" (red) if never synced.
 - Clicking ⟳ calls `POST /api/sync/{ticker}`, then polls `GET /api/sync/status/{ticker}` every 2s until `status != "running"`, then refreshes the date display.
 - Sync button shows a CSS spin animation while running.
+
+**Chart rendering (`renderCharts(msgEl, chartData)`):**
+Called when a `type: "chart"` SSE event arrives. Appends a `.chart-wrap` div as a sibling to the text bubble (so `done`'s markdown re-render doesn't overwrite charts).
+- `mode: "single"` → two Chart.js canvases: 14-day close price (line, filled) + 7-day sentiment (bar, green/red by sign)
+- `mode: "comparison"` → two Chart.js canvases: normalized % change from day 1 (two lines) + side-by-side daily sentiment bars
+- Uses Chart.js 4 from CDN (`chart.umd.min.js`). No build step.
 
 ---
 
