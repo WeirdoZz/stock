@@ -13,10 +13,22 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+import time as _time
+from concurrent.futures import ThreadPoolExecutor
+
 from agent.zoom_client import ZoomLLMClient, TextBlock
 from agent.tool_executor import execute_tool
 from agent.prompts import ANALYSIS_PROMPT, COMPARISON_PROMPT
 from config.settings import settings
+
+# ── Tools result cache ────────────────────────────────────────────────────────
+_tools_cache: dict[str, tuple[dict, float]] = {}
+_TOOLS_CACHE_TTL = 20 * 60  # 20 minutes
+
+
+def invalidate_tools_cache(ticker: str) -> None:
+    """Call after sync completes so the next analysis sees fresh data."""
+    _tools_cache.pop(ticker.upper(), None)
 
 
 # ── LLM client factory ────────────────────────────────────────────────────────
@@ -121,15 +133,32 @@ class _AliyunAdapter:
 # ── Tool runner (Python-side, no LLM involvement) ─────────────────────────────
 
 def _run_all_tools(ticker: str, verbose: bool) -> dict:
-    """Run all 4 tools in Python and return their results."""
-    results = {}
+    """Collect all data for ticker. Results are cached for 20 minutes."""
+    cache_key = ticker.upper()
+    now = _time.time()
+    cached = _tools_cache.get(cache_key)
+    if cached and now < cached[1]:
+        if verbose:
+            print(f"[tools] cache hit for {ticker} (expires in {int(cached[1] - now)}s)")
+        return cached[0]
 
+    results = _collect_tools(ticker, verbose)
+    _tools_cache[cache_key] = (results, now + _TOOLS_CACHE_TTL)
+    return results
+
+
+def _collect_tools(ticker: str, verbose: bool) -> dict:
+    """Actually run all tools — news sequential, then 5 tasks in parallel."""
+    from ingestion.prices.options_sentiment import get_put_call_ratio
+    from ingestion.news.finnhub_news import get_insider_transactions
+
+    # Step 1: News first — top_headlines needed by similar search
     if verbose:
         print(f"[tools] fetch_current_news({ticker}, 72h)")
     raw = execute_tool("fetch_current_news", {"ticker": ticker, "hours_back": 72})
     data = json.loads(raw)
     articles = data.get("articles", [])
-    results["news"] = {
+    news_result = {
         "count": data.get("count", 0),
         "articles": [
             {
@@ -139,54 +168,60 @@ def _run_all_tools(ticker: str, verbose: bool) -> dict:
                 "sentiment_score": a.get("sentiment_score"),
                 "source": a.get("source"),
             }
-            for a in articles[:20]  # top 20
+            for a in articles[:20]
         ],
     }
-
     top_headlines = [a["headline"] for a in articles[:8]]
 
+    # Step 2: Remaining 5 tasks in parallel
     if verbose:
-        print(f"[tools] search_similar_historical_events({ticker})")
-    raw = execute_tool("search_similar_historical_events", {
-        "ticker": ticker,
-        "headlines": top_headlines,
-        "n_results": 8,
-    })
-    data = json.loads(raw)
-    results["similar"] = {
-        "similar_events_found": data.get("similar_events_found", 0),
-        "similar_events": data.get("similar_events", []),
-        "aggregate_stats": data.get("aggregate_stats", {}),
-    }
+        print(f"[tools] launching parallel tasks for {ticker}")
+
+    def _similar():
+        raw = execute_tool("search_similar_historical_events", {
+            "ticker": ticker, "headlines": top_headlines, "n_results": 8,
+        })
+        d = json.loads(raw)
+        return "similar", {
+            "similar_events_found": d.get("similar_events_found", 0),
+            "similar_events": d.get("similar_events", []),
+            "aggregate_stats": d.get("aggregate_stats", {}),
+        }
+
+    def _prices():
+        raw = execute_tool("get_price_history", {
+            "ticker": ticker, "days_back": 14, "interval": "1d",
+        })
+        d = json.loads(raw)
+        bars = d.get("bars", [])
+        return "prices", {
+            "count": d.get("count", 0),
+            "interval": d.get("interval"),
+            "bars": [
+                {"timestamp": b["timestamp"], "close": b["close"], "volume": b["volume"]}
+                for b in bars
+            ],
+        }
+
+    def _corr():
+        raw = execute_tool("get_correlation_stats", {"ticker": ticker})
+        return "correlation_stats", json.loads(raw)
+
+    def _pcr():
+        return "put_call_ratio", get_put_call_ratio(ticker)
+
+    def _insider():
+        return "insider_transactions", get_insider_transactions(ticker)
+
+    results = {"news": news_result}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(fn) for fn in (_similar, _prices, _corr, _pcr, _insider)]
+        for future in futures:
+            key, value = future.result()
+            results[key] = value
 
     if verbose:
-        print(f"[tools] get_price_history({ticker}, 14d)")
-    raw = execute_tool("get_price_history", {"ticker": ticker, "days_back": 14, "interval": "1d"})
-    data = json.loads(raw)
-    bars = data.get("bars", [])
-    results["prices"] = {
-        "count": data.get("count", 0),
-        "interval": data.get("interval"),
-        "bars": [
-            {"timestamp": b["timestamp"], "close": b["close"], "volume": b["volume"]}
-            for b in bars
-        ],
-    }
-
-    if verbose:
-        print(f"[tools] get_correlation_stats({ticker})")
-    raw = execute_tool("get_correlation_stats", {"ticker": ticker})
-    results["correlation_stats"] = json.loads(raw)
-
-    if verbose:
-        print(f"[tools] get_put_call_ratio({ticker})")
-    from ingestion.prices.options_sentiment import get_put_call_ratio
-    results["put_call_ratio"] = get_put_call_ratio(ticker)
-
-    if verbose:
-        print(f"[tools] get_insider_transactions({ticker})")
-    from ingestion.news.finnhub_news import get_insider_transactions
-    results["insider_transactions"] = get_insider_transactions(ticker)
+        print(f"[tools] all parallel tasks done for {ticker}")
 
     return results
 

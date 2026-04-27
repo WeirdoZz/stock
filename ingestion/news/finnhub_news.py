@@ -5,6 +5,7 @@ This solves the historical news gap that Alpha Vantage free tier has.
 """
 from __future__ import annotations
 import hashlib
+import time
 import requests
 import urllib3
 from datetime import datetime, timedelta
@@ -16,6 +17,10 @@ from sqlalchemy.dialects.sqlite import insert
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 FINNHUB_BASE = "https://finnhub.io/api/v1"
+
+# In-memory cache for insider transactions (changes at most daily)
+_insider_cache: dict[str, tuple[list, float]] = {}
+_INSIDER_TTL = 6 * 3600  # 6 hours
 
 
 def _article_id(url: str, headline: str) -> str:
@@ -95,7 +100,15 @@ def fetch_and_store(ticker: str, days_back: int = 90,
 
 
 def get_insider_transactions(ticker: str) -> list[dict]:
-    """Fetch recent insider transactions (buy/sell) for a ticker."""
+    """Fetch recent insider transactions (buy/sell) for a ticker.
+    Results are cached for 6 hours.
+    """
+    cache_key = ticker.upper()
+    now = time.time()
+    cached = _insider_cache.get(cache_key)
+    if cached and now < cached[1]:
+        return cached[0]
+
     if not settings.finnhub_api_key:
         return []
 
@@ -127,4 +140,6 @@ def get_insider_transactions(ticker: str) -> list[dict]:
         for t in txns
         if t.get("transactionCode") in ("P", "S") and not t.get("isDerivative")
     ]
-    return relevant[:20]  # most recent 20
+    result = relevant[:20]
+    _insider_cache[cache_key] = (result, now + _INSIDER_TTL)
+    return result

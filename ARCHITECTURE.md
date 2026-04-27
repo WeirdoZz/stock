@@ -144,7 +144,9 @@ analysis/embedder.py → embed_pending()                      → ChromaDB
 | `run_query` | `(ticker: str, verbose: bool) → str` | Sync wrapper for CLI use. Calls `asyncio.run()`. Do NOT call from async context. |
 | `run_query_stream` | `async gen (ticker, verbose, reply_language)` | Single-ticker async generator. Yields `status` → `chunks` → `chart` → `done`. Guards against missing data: yields `error` and returns if no price data exists. |
 | `run_comparison_stream` | `async gen (ticker_a, ticker_b, verbose, reply_language)` | Two-ticker comparison. Collects both tickers' data in parallel via `asyncio.gather`, then streams `COMPARISON_PROMPT` to LLM. Yields same event types as `run_query_stream`. |
-| `_run_all_tools` | `(ticker, verbose) → dict` | Sync. Runs all 6 data tools, returns dict with keys: `news`, `similar`, `prices`, `correlation_stats`, `put_call_ratio`, `insider_transactions`. |
+| `_run_all_tools` | `(ticker, verbose) → dict` | Cache wrapper (20-min TTL, key = ticker). Returns cached result on hit; calls `_collect_tools` on miss and stores result. |
+| `_collect_tools` | `(ticker, verbose) → dict` | Actual data collection: news fetched first (serial), then similar/prices/corr/PCR/insider run in parallel via `ThreadPoolExecutor(max_workers=5)`. |
+| `invalidate_tools_cache` | `(ticker) → None` | Removes ticker's entry from `_tools_cache`. Called by `data.py` when sync completes so the next analysis sees fresh data. |
 | `_build_chart_data` | `(ticker, tool_data) → dict` | Builds single-ticker chart payload: `{mode: "single", tickers, prices: {ticker: [{date, close}]}, sentiment: {ticker: [{date, avg_score, count}]}}`. Calls `get_daily_sentiment()` for 7-day sentiment. |
 | `_build_comparison_chart_data` | `(ticker_a, ticker_b, data_a, data_b) → dict` | Builds comparison chart payload: `{mode: "comparison", tickers, prices: {...}, sentiment: {...}}`. Frontend normalizes prices to % change from day 1. |
 | `_build_llm_client` | `() → adapter` | Factory. Reads `LLM_BACKEND` env var, returns `ZoomLLMClient`, `_AnthropicAdapter`, or `_AliyunAdapter`. |
@@ -455,5 +457,6 @@ PORT=8080 bash start.sh  # custom port
 | `start.sh` exits silently with no error | `set -e` + `[ -z "$val" ] && cmd` returns 1 when val is set | Use `if [ -z ]; then fi` in bash functions |
 | SFTP file transfers reset mtime | PyCharm SFTP doesn't preserve timestamps | Use md5 hash comparison instead of mtime for dep check |
 | LLM hallucinates data for unsynced tickers | `_run_all_tools()` returns empty arrays; LLM fills gaps with invented data | `run_query_stream()` now checks `get_latest_price_date()` first and yields `type=error` if None |
+| Tools cache serves stale data after sync | 20-min TTL survives sync completion | `invalidate_tools_cache(ticker)` called in `_run_sync_tracked` immediately after sync finishes |
 | Sync fails silently when one news source is down | Any exception in `ingest_all_news()` propagated upward | Each source wrapped in `_safe_fetch()` — failure logs a warning and returns 0, others continue |
 | Sync status lost after server restart | `_sync_status` is in-memory only | Expected behavior; use `GET /api/status/{ticker}` (DB-backed) for persistent data freshness info |

@@ -105,6 +105,9 @@ def _run_sync_tracked(ticker: str) -> None:
     try:
         _run_sync(ticker)
         _sync_status[ticker].update({"status": "done", "finished_at": datetime.utcnow().isoformat()})
+        # Bust the in-memory tools cache so next analysis sees fresh data
+        from agent.agent import invalidate_tools_cache
+        invalidate_tools_cache(ticker)
     except Exception as exc:
         _sync_status[ticker].update({
             "status": "error",

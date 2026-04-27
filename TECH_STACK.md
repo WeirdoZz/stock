@@ -41,6 +41,8 @@
 - **用途：** 存储结构化数据（价格、新闻、相关性快照）
 - **文件路径：** `data/stock.db`（`DB_PATH` 可配置）
 - **表：** `news_articles`、`price_bars`、`correlation_snapshots`
+- **连接池：** `pool_size=5, max_overflow=10, pool_pre_ping=True`
+- **WAL 模式：** 启动时通过 `@event.listens_for(engine, "connect")` 执行 `PRAGMA journal_mode=WAL`，允许读写并发；`PRAGMA synchronous=NORMAL` 兼顾性能和持久性；`PRAGMA cache_size=-32000` 分配 32MB 页缓存
 - **为什么 SQLite：** 单机部署，无需独立数据库服务，文件直接 SFTP 备份
 
 ### ChromaDB
@@ -102,6 +104,18 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 - **失败处理：** 同上，独立隔离
 
 ---
+
+## 内存缓存（无依赖）
+
+项目使用简单的 `dict + time.time()` 实现 TTL 缓存，无需 Redis 或 cachetools：
+
+| 缓存位置 | key | TTL | 作用 |
+|---|---|---|---|
+| `agent/agent.py:_tools_cache` | `ticker` | 20 分钟 | `_run_all_tools` 结果；sync 完成后主动失效 |
+| `ingestion/prices/options_sentiment.py:_pcr_cache` | `ticker:date` | 6 小时 | PCR 不随日内变化 |
+| `ingestion/news/finnhub_news.py:_insider_cache` | `ticker` | 6 小时 | Insider 交易数据日内稳定 |
+
+**并行工具采集：** `_collect_tools` 中，news 顺序先跑（subsequent tasks 依赖 headlines），其余 5 个任务（similar search、prices、corr stats、PCR、insider）通过 `ThreadPoolExecutor(max_workers=5)` 并行执行，节省 HTTP 等待时间约 500–1000ms。
 
 ## 定时任务
 

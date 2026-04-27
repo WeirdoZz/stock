@@ -5,6 +5,7 @@ Fetch options market sentiment signals from Alpha Vantage.
 Both work on free key; Vol/OI is subject to 25 req/day limit.
 """
 from __future__ import annotations
+import time
 import requests
 import urllib3
 from config.settings import settings
@@ -13,11 +14,16 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 AV_BASE = "https://www.alphavantage.co/query"
 
+# In-memory cache: key → (result, expires_at)
+_pcr_cache: dict[str, tuple[dict, float]] = {}
+_PCR_TTL = 6 * 3600  # 6 hours — PCR doesn't change intraday
+
 
 def get_put_call_ratio(ticker: str, date: str | None = None) -> dict:
     """
     Returns put-call ratio for the given ticker.
     date: 'YYYY-MM-DD' or None for latest session.
+    Results are cached for 6 hours (PCR doesn't change intraday).
 
     Interpretation:
       PCR <= 0.6  → Bullish (more calls than puts)
@@ -25,6 +31,12 @@ def get_put_call_ratio(ticker: str, date: str | None = None) -> dict:
       PCR >= 1.0  → Bearish (more puts than calls)
     Note: Extreme readings can be contrarian signals.
     """
+    cache_key = f"{ticker.upper()}:{date or 'latest'}"
+    now = time.time()
+    cached = _pcr_cache.get(cache_key)
+    if cached and now < cached[1]:
+        return cached[0]
+
     if not settings.alpha_vantage_api_key:
         return {"error": "No Alpha Vantage API key configured"}
 
@@ -62,7 +74,7 @@ def get_put_call_ratio(ticker: str, date: str | None = None) -> dict:
     # Nearest expirations (next 4)
     by_expiry = data.get("put_call_ratio_by_expiration", [])[:4]
 
-    return {
+    result = {
         "ticker": ticker.upper(),
         "date": data.get("date", "latest"),
         "put_call_ratio": pcr_value,
@@ -70,6 +82,8 @@ def get_put_call_ratio(ticker: str, date: str | None = None) -> dict:
         "interpretation": interpretation,
         "by_expiration": by_expiry,
     }
+    _pcr_cache[cache_key] = (result, now + _PCR_TTL)
+    return result
 
 
 def get_volume_oi_ratio(ticker: str, date: str | None = None) -> dict:
