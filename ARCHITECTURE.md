@@ -51,7 +51,7 @@ stock/
 │   ├── session.py            # In-memory session store (TTL 1h, max 20 msgs)
 │   └── routes/
 │       ├── chat.py           # POST /api/chat → SSE stream
-│       └── data.py           # GET /api/tickers, GET /api/status/{ticker}, POST /api/sync/{ticker}
+│       └── data.py           # GET /api/tickers, GET /api/status/{ticker}, POST /api/sync/{ticker}, GET /api/sync/status/{ticker}
 │
 ├── ingestion/                # External data collection
 │   ├── news/
@@ -121,11 +121,12 @@ agent/agent.py: run_query_stream(ticker, reply_language)
 ```
 Trigger: scheduler (auto on startup) OR CLI sync OR POST /api/sync/{ticker}
   │
-  ▼
+  ▼  (status tracked in api/routes/data.py:_sync_status dict)
 ingestion/prices/yfinance_client.py → fetch_and_store()     → PriceBar table
 ingestion/news/aggregator.py → ingest_all_news()            → NewsArticle table
-  ├─ alpha_vantage_news.py
-  └─ finnhub_news.py
+  ├─ alpha_vantage_news.py  (isolated — failure logs warning, continues)
+  ├─ financial_juice.py     (isolated — failure logs warning, continues)
+  └─ finnhub_news.py        (isolated — failure logs warning, continues)
 analysis/correlator.py → compute_correlations()             → CorrelationSnapshot table
 analysis/embedder.py → embed_pending()                      → ChromaDB
 ```
@@ -141,7 +142,7 @@ analysis/embedder.py → embed_pending()                      → ChromaDB
 | Function | Signature | Description |
 |---|---|---|
 | `run_query` | `(ticker: str, verbose: bool) → str` | Sync wrapper for CLI use. Calls `asyncio.run()`. Do NOT call from async context. |
-| `run_query_stream` | `async gen (ticker, verbose, reply_language)` | Async generator for API streaming. Yields `{"type": "status/chunk/done", "content": str}`. |
+| `run_query_stream` | `async gen (ticker, verbose, reply_language)` | Async generator for API streaming. Yields `{"type": "status/chunk/done/error", "content": str}`. **Guards against missing data:** if `get_latest_price_date(ticker)` is `None`, yields `type=error` and returns immediately — no LLM call is made. |
 | `_run_all_tools` | `(ticker, verbose) → dict` | Sync. Runs all 6 data tools, returns dict with keys: `news`, `similar`, `prices`, `correlation_stats`, `put_call_ratio`, `insider_transactions`. |
 | `_build_llm_client` | `() → adapter` | Factory. Reads `LLM_BACKEND` env var, returns `ZoomLLMClient`, `_AnthropicAdapter`, or `_AliyunAdapter`. |
 
@@ -240,7 +241,8 @@ Base URL: `http://host:9999`
 | `POST` | `/api/chat` | Streaming analysis. Body: `ChatRequest`. Response: SSE stream. |
 | `GET` | `/api/tickers` | Returns `list[str]` of watched tickers from settings. |
 | `GET` | `/api/status/{ticker}` | Returns `TickerStatus` JSON with DB record counts and staleness. |
-| `POST` | `/api/sync/{ticker}` | Queues background sync. Returns `{"status": "queued"}` immediately. |
+| `POST` | `/api/sync/{ticker}` | Queues background sync. Returns `{"status": "queued"}` immediately. If already running, returns `{"status": "already_running"}` without queuing again. |
+| `GET` | `/api/sync/status/{ticker}` | Returns current sync state: `{"ticker", "status": "idle\|running\|done\|error", "started_at", "finished_at", "error"}`. State is in-memory — resets on server restart. |
 
 ### SSE Event Types (`POST /api/chat`)
 
@@ -372,6 +374,12 @@ Uses `fetch()` + `ReadableStream` (not `EventSource`) because SSE over POST is n
 
 **Session management:** `session_id` received in the first `type=session` event is stored in a JS variable and sent back with every subsequent request.
 
+**Sidebar (ticker list):**
+Each ticker row shows: `[ticker name] [last sync date] [⟳ sync button]`.
+- Date is fetched from `GET /api/status/{ticker}` on page load; red if `days_stale >= 1`, "未同步" (red) if never synced.
+- Clicking ⟳ calls `POST /api/sync/{ticker}`, then polls `GET /api/sync/status/{ticker}` every 2s until `status != "running"`, then refreshes the date display.
+- Sync button shows a CSS spin animation while running.
+
 ---
 
 ## 10. CLI Reference
@@ -434,3 +442,6 @@ PORT=8080 bash start.sh  # custom port
 | Embedding model reloads on every request | Lazy init — first request triggers load | Pre-warm via `_get_embedder()` in FastAPI startup |
 | `start.sh` exits silently with no error | `set -e` + `[ -z "$val" ] && cmd` returns 1 when val is set | Use `if [ -z ]; then fi` in bash functions |
 | SFTP file transfers reset mtime | PyCharm SFTP doesn't preserve timestamps | Use md5 hash comparison instead of mtime for dep check |
+| LLM hallucinates data for unsynced tickers | `_run_all_tools()` returns empty arrays; LLM fills gaps with invented data | `run_query_stream()` now checks `get_latest_price_date()` first and yields `type=error` if None |
+| Sync fails silently when one news source is down | Any exception in `ingest_all_news()` propagated upward | Each source wrapped in `_safe_fetch()` — failure logs a warning and returns 0, others continue |
+| Sync status lost after server restart | `_sync_status` is in-memory only | Expected behavior; use `GET /api/status/{ticker}` (DB-backed) for persistent data freshness info |

@@ -15,11 +15,28 @@
     display: flex; flex-direction: column; padding: 16px 8px; gap: 6px; overflow-y: auto;
   }
   #sidebar h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #8e8ea0; padding: 4px 8px 8px; }
+  .ticker-row {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 4px; border-radius: 6px;
+  }
+  .ticker-row:hover { background: #2a2b32; }
   .ticker-btn {
     background: none; border: none; color: #ececec; cursor: pointer;
-    text-align: left; padding: 8px 10px; border-radius: 6px; font-size: 13px; font-weight: 500;
+    text-align: left; padding: 4px 6px; border-radius: 4px; font-size: 13px; font-weight: 500;
+    flex: 1; min-width: 0;
   }
-  .ticker-btn:hover { background: #2a2b32; }
+  .ticker-meta {
+    font-size: 10px; color: #8e8ea0; white-space: nowrap; padding: 0 2px;
+  }
+  .ticker-meta.stale { color: #f87171; }
+  .sync-btn {
+    background: none; border: none; color: #8e8ea0; cursor: pointer;
+    font-size: 13px; padding: 2px 4px; border-radius: 4px; line-height: 1;
+    flex-shrink: 0;
+  }
+  .sync-btn:hover { color: #ececec; background: #3a3b42; }
+  .sync-btn.spinning { animation: spin 1s linear infinite; color: #10a37f; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
   /* Main */
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -104,15 +121,114 @@
   const sidebar = document.getElementById('sidebar');
 
   // ── Load tickers ────────────────────────────────────────────────────────────
+  const tickerRows = {}; // ticker -> { metaEl, syncBtnEl, pollTimer }
+
+  function fmtDate(isoStr) {
+    if (!isoStr) return null;
+    const d = new Date(isoStr);
+    const now = new Date();
+    const diffDays = Math.floor((now - d) / 86400000);
+    if (diffDays === 0) return '今天';
+    if (diffDays === 1) return '昨天';
+    return diffDays + '天前';
+  }
+
+  function updateTickerMeta(ticker, status) {
+    const row = tickerRows[ticker];
+    if (!row) return;
+    const { metaEl, syncBtnEl } = row;
+    const syncState = status.sync_status || 'idle';
+
+    if (syncState === 'running') {
+      syncBtnEl.classList.add('spinning');
+      syncBtnEl.title = '同步中...';
+      metaEl.textContent = '同步中';
+      metaEl.className = 'ticker-meta';
+    } else {
+      syncBtnEl.classList.remove('spinning');
+      syncBtnEl.title = '同步数据';
+      if (!status.last_price_date) {
+        metaEl.textContent = '未同步';
+        metaEl.className = 'ticker-meta stale';
+      } else {
+        const label = fmtDate(status.last_price_date);
+        const stale = (status.days_stale != null && status.days_stale >= 1);
+        metaEl.textContent = label;
+        metaEl.className = 'ticker-meta' + (stale ? ' stale' : '');
+      }
+    }
+  }
+
+  function startSyncPoll(ticker) {
+    const row = tickerRows[ticker];
+    if (!row) return;
+    if (row.pollTimer) clearInterval(row.pollTimer);
+    row.pollTimer = setInterval(() => {
+      fetch('/api/sync/status/' + ticker)
+        .then(r => r.json())
+        .then(st => {
+          updateTickerMeta(ticker, { ...st, sync_status: st.status });
+          if (st.status !== 'running') {
+            clearInterval(row.pollTimer);
+            row.pollTimer = null;
+            // Refresh price date from /api/status after sync finishes
+            fetch('/api/status/' + ticker)
+              .then(r => r.json())
+              .then(s => updateTickerMeta(ticker, { ...s, sync_status: 'idle' }))
+              .catch(() => {});
+          }
+        })
+        .catch(() => { clearInterval(row.pollTimer); row.pollTimer = null; });
+    }, 2000);
+  }
+
+  function triggerSync(ticker) {
+    const row = tickerRows[ticker];
+    if (!row) return;
+    // Optimistically show running state
+    updateTickerMeta(ticker, { sync_status: 'running' });
+    fetch('/api/sync/' + ticker, { method: 'POST' })
+      .then(() => startSyncPoll(ticker))
+      .catch(() => {});
+  }
+
   fetch('/api/tickers')
     .then(r => r.json())
     .then(tickers => {
       tickers.forEach(t => {
+        const row = document.createElement('div');
+        row.className = 'ticker-row';
+
         const btn = document.createElement('button');
         btn.className = 'ticker-btn';
         btn.textContent = t;
         btn.onclick = () => { inputEl.value = t + ' '; inputEl.focus(); };
-        sidebar.appendChild(btn);
+
+        const metaEl = document.createElement('span');
+        metaEl.className = 'ticker-meta';
+        metaEl.textContent = '...';
+
+        const syncBtn = document.createElement('button');
+        syncBtn.className = 'sync-btn';
+        syncBtn.textContent = '⟳';
+        syncBtn.title = '同步数据';
+        syncBtn.onclick = (e) => { e.stopPropagation(); triggerSync(t); };
+
+        row.appendChild(btn);
+        row.appendChild(metaEl);
+        row.appendChild(syncBtn);
+        sidebar.appendChild(row);
+        tickerRows[t] = { metaEl, syncBtnEl: syncBtn, pollTimer: null };
+
+        // Load initial status
+        Promise.all([
+          fetch('/api/status/' + t).then(r => r.json()).catch(() => null),
+          fetch('/api/sync/status/' + t).then(r => r.json()).catch(() => null),
+        ]).then(([statusData, syncData]) => {
+          const syncState = syncData ? syncData.status : 'idle';
+          updateTickerMeta(t, { ...(statusData || {}), sync_status: syncState });
+          if (syncState === 'running') startSyncPoll(t);
+        });
       });
     })
     .catch(() => {});

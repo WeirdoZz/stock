@@ -105,7 +105,9 @@ fi
 # ── Check required keys ───────────────────────────────────────────────────────
 check_env() {
     val=$(grep -E "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' || echo "")
-    [ -z "$val" ] && warn ".env: $1 is not set"
+    if [ -z "$val" ]; then
+        warn ".env: $1 is not set"
+    fi
 }
 
 BACKEND=$(grep -E "^LLM_BACKEND=" .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || echo "")

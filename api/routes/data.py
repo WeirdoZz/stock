@@ -1,4 +1,4 @@
-"""GET /api/tickers, GET /api/status/{ticker}, POST /api/sync/{ticker}"""
+"""GET /api/tickers, GET /api/status/{ticker}, POST /api/sync/{ticker}, GET /api/sync/status/{ticker}"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,6 +9,9 @@ from api.models import TickerStatus
 from config.settings import settings
 
 router = APIRouter()
+
+# In-memory sync status per ticker: {ticker: {status, started_at, finished_at, error}}
+_sync_status: dict[str, dict] = {}
 
 
 @router.get("/api/tickers")
@@ -92,10 +95,39 @@ def _run_sync(ticker: str) -> None:
     embed_pending(ticker=ticker)
 
 
+def _run_sync_tracked(ticker: str) -> None:
+    _sync_status[ticker] = {
+        "status": "running",
+        "started_at": datetime.utcnow().isoformat(),
+        "finished_at": None,
+        "error": None,
+    }
+    try:
+        _run_sync(ticker)
+        _sync_status[ticker].update({"status": "done", "finished_at": datetime.utcnow().isoformat()})
+    except Exception as exc:
+        _sync_status[ticker].update({
+            "status": "error",
+            "finished_at": datetime.utcnow().isoformat(),
+            "error": str(exc),
+        })
+
+
+@router.get("/api/sync/status/{ticker}")
+def sync_status(ticker: str):
+    ticker = ticker.upper()
+    if ticker not in settings.ticker_list:
+        raise HTTPException(status_code=404, detail=f"{ticker} is not in the watched list")
+    state = _sync_status.get(ticker, {"status": "idle"})
+    return {"ticker": ticker, **state}
+
+
 @router.post("/api/sync/{ticker}")
 def sync_ticker(ticker: str, background_tasks: BackgroundTasks):
     ticker = ticker.upper()
     if ticker not in settings.ticker_list:
         raise HTTPException(status_code=404, detail=f"{ticker} is not in the watched list")
-    background_tasks.add_task(_run_sync, ticker)
+    if _sync_status.get(ticker, {}).get("status") == "running":
+        return {"status": "already_running", "ticker": ticker}
+    background_tasks.add_task(_run_sync_tracked, ticker)
     return {"status": "queued", "ticker": ticker}

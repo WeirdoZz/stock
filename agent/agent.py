@@ -233,6 +233,19 @@ def run_query(ticker: str, verbose: bool = False) -> str:
 async def run_query_stream(ticker: str, verbose: bool = False, reply_language: str = "English"):
     """Async generator yielding status updates and LLM chunks for streaming."""
     ticker = ticker.upper()
+
+    # Guard: abort early if ticker has never been synced
+    from storage.repository import get_latest_price_date
+    if get_latest_price_date(ticker) is None:
+        yield {
+            "type": "error",
+            "content": (
+                f"{ticker} 尚无本地数据，请先同步。\n"
+                f"点击侧边栏的 ⟳ 按钮，或调用 POST /api/sync/{ticker}"
+            ),
+        }
+        return
+
     yield {"type": "status", "content": "Collecting market data..."}
     loop = asyncio.get_event_loop()
     tool_data = await loop.run_in_executor(None, _run_all_tools, ticker, verbose)
