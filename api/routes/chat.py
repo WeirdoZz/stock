@@ -41,13 +41,16 @@ def _resolve_ticker(text: str, ticker_list: list) -> tuple[str | None, bool]:
       - (T, True)  : found a ticker that's already in the registered list
       - (T, False) : found exactly one unknown candidate worth validating
       - (None, _)  : nothing actionable
+
+    Case-insensitive: 'aapl' / 'AAPL' / 'Aapl' are all treated equivalently.
     """
     # Chinese alias takes priority — alias map only contains real tickers
     for alias, ticker in _ALIASES.items():
         if alias in text:
             return ticker, ticker in ticker_list
 
-    matches = [m.group(1) for m in _TICKER_RE.finditer(text)]
+    # Uppercase first so lowercase ticker references ('uuuu', 'aapl') get matched.
+    matches = [m.group(1) for m in _TICKER_RE.finditer(text.upper())]
     matches = [t for t in matches if len(t) >= 2]  # skip "I", "A"
 
     # Prefer registered matches

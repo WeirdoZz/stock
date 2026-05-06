@@ -177,7 +177,12 @@ class TestResolveTicker:
         from api.routes.chat import _resolve_ticker
         assert _resolve_ticker("hello world", ["AAPL"]) == (None, False)
 
-    def test_lowercase_tickers_ignored(self):
-        """Regex requires uppercase — 'aapl' shouldn't be picked up."""
+    def test_lowercase_registered_ticker(self):
+        """Lowercase ticker references should resolve the same as uppercase."""
         from api.routes.chat import _resolve_ticker
-        assert _resolve_ticker("aapl in lowercase", ["AAPL"]) == (None, False)
+        assert _resolve_ticker("aapl 怎么样", ["AAPL"]) == ("AAPL", True)
+
+    def test_lowercase_unregistered_candidate(self):
+        """Lowercase unknown candidate should still be picked up for validation."""
+        from api.routes.chat import _resolve_ticker
+        assert _resolve_ticker("帮我分析一下uuuu这只股票", ["AAPL"]) == ("UUUU", False)
