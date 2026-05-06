@@ -69,12 +69,15 @@ def ticker_status(ticker: str) -> TickerStatus:
 
 
 def _run_sync(ticker: str) -> None:
+    import logging
     from datetime import timedelta
     from storage.repository import get_latest_price_date, get_latest_news_date
     from ingestion.prices.yfinance_client import fetch_and_store as fetch_prices
     from ingestion.news.aggregator import ingest_all_news
     from analysis.correlator import compute_correlations
     from analysis.embedder import embed_pending
+
+    log = logging.getLogger(__name__)
 
     last_price = get_latest_price_date(ticker)
     last_news = get_latest_news_date(ticker)
@@ -90,13 +93,21 @@ def _run_sync(ticker: str) -> None:
         price_from = last_price - timedelta(days=1)
         news_from = last_news - timedelta(days=1) if last_news else None
 
-    fetch_prices(ticker, days_back=days_back, interval="1d", from_date=price_from)
-    ingest_all_news(ticker, days_back=days_back, from_date=news_from)
-    compute_correlations(ticker)
-    embed_pending(ticker=ticker)
+    log.info("[sync] %s starting (first_run=%s, days_back=%s)", ticker, is_first_run, days_back)
+
+    p = fetch_prices(ticker, days_back=days_back, interval="1d", from_date=price_from)
+    counts = ingest_all_news(ticker, days_back=days_back, from_date=news_from)
+    c = compute_correlations(ticker)
+    e = embed_pending(ticker=ticker)
 
     from ingestion.fundamentals.finnhub_fundamentals import fetch_and_store as fetch_fundamentals
     fetch_fundamentals(ticker)
+
+    log.info("[sync] %s done: +%s bars, +%s articles (av=%s, fj=%s, fh=%s), "
+             "+%s correlations, +%s embeddings",
+             ticker, p, counts.get("total", 0),
+             counts.get("alpha_vantage", 0), counts.get("financial_juice", 0),
+             counts.get("finnhub", 0), c, e)
 
 
 def _run_sync_tracked(ticker: str) -> None:

@@ -310,6 +310,7 @@ All events are JSON-encoded in `data:` field:
 | `status` | During pipeline | Human-readable progress string |
 | `chunk` | During LLM streaming | Partial text to append to bubble |
 | `chart` | After last chunk, before `done` | JSON string — chart payload `{mode, tickers, prices, sentiment}`; frontend calls `renderCharts()` |
+| `ticker_registered` | When a new ticker is auto-registered via chat (before `chunk`) | The ticker symbol — frontend appends a sidebar row and starts polling sync status |
 | `done` | Final event | `""` — triggers final markdown re-render |
 | `error` | On any failure | Error message string |
 

@@ -203,45 +203,46 @@
       .catch(() => {});
   }
 
+  function addTickerRow(t) {
+    if (tickerRows[t]) return;  // already exists
+    const row = document.createElement('div');
+    row.className = 'ticker-row';
+
+    const btn = document.createElement('button');
+    btn.className = 'ticker-btn';
+    btn.textContent = t;
+    btn.onclick = () => { inputEl.value = t + ' '; inputEl.focus(); };
+
+    const metaEl = document.createElement('span');
+    metaEl.className = 'ticker-meta';
+    metaEl.textContent = '...';
+
+    const syncBtn = document.createElement('button');
+    syncBtn.className = 'sync-btn';
+    syncBtn.textContent = '⟳';
+    syncBtn.title = '同步数据';
+    syncBtn.onclick = (e) => { e.stopPropagation(); triggerSync(t); };
+
+    row.appendChild(btn);
+    row.appendChild(metaEl);
+    row.appendChild(syncBtn);
+    sidebar.appendChild(row);
+    tickerRows[t] = { metaEl, syncBtnEl: syncBtn, pollTimer: null };
+
+    // Load initial status
+    Promise.all([
+      fetch('/api/status/' + t).then(r => r.json()).catch(() => null),
+      fetch('/api/sync/status/' + t).then(r => r.json()).catch(() => null),
+    ]).then(([statusData, syncData]) => {
+      const syncState = syncData ? syncData.status : 'idle';
+      updateTickerMeta(t, { ...(statusData || {}), sync_status: syncState });
+      if (syncState === 'running') startSyncPoll(t);
+    });
+  }
+
   fetch('/api/tickers')
     .then(r => r.json())
-    .then(tickers => {
-      tickers.forEach(t => {
-        const row = document.createElement('div');
-        row.className = 'ticker-row';
-
-        const btn = document.createElement('button');
-        btn.className = 'ticker-btn';
-        btn.textContent = t;
-        btn.onclick = () => { inputEl.value = t + ' '; inputEl.focus(); };
-
-        const metaEl = document.createElement('span');
-        metaEl.className = 'ticker-meta';
-        metaEl.textContent = '...';
-
-        const syncBtn = document.createElement('button');
-        syncBtn.className = 'sync-btn';
-        syncBtn.textContent = '⟳';
-        syncBtn.title = '同步数据';
-        syncBtn.onclick = (e) => { e.stopPropagation(); triggerSync(t); };
-
-        row.appendChild(btn);
-        row.appendChild(metaEl);
-        row.appendChild(syncBtn);
-        sidebar.appendChild(row);
-        tickerRows[t] = { metaEl, syncBtnEl: syncBtn, pollTimer: null };
-
-        // Load initial status
-        Promise.all([
-          fetch('/api/status/' + t).then(r => r.json()).catch(() => null),
-          fetch('/api/sync/status/' + t).then(r => r.json()).catch(() => null),
-        ]).then(([statusData, syncData]) => {
-          const syncState = syncData ? syncData.status : 'idle';
-          updateTickerMeta(t, { ...(statusData || {}), sync_status: syncState });
-          if (syncState === 'running') startSyncPoll(t);
-        });
-      });
-    })
+    .then(tickers => tickers.forEach(addTickerRow))
     .catch(() => {});
 
   // ── Auto-resize textarea ─────────────────────────────────────────────────────
@@ -507,6 +508,14 @@
               rawText += event.content;
               bubble.innerHTML = marked.parse(rawText);
               messagesEl.scrollTop = messagesEl.scrollHeight;
+
+            } else if (event.type === 'ticker_registered') {
+              // Server registered a new ticker — add it to the sidebar and start polling sync
+              const newTicker = event.content;
+              addTickerRow(newTicker);
+              // The backend already kicked off the sync; show running state immediately
+              updateTickerMeta(newTicker, { sync_status: 'running' });
+              startSyncPoll(newTicker);
 
             } else if (event.type === 'chart') {
                 try {

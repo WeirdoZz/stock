@@ -34,6 +34,10 @@ def _get(endpoint: str, params: dict) -> dict | list | None:
             timeout=15,
             verify=False,
         )
+        if resp.status_code == 403:
+            # Premium-only endpoint on free tier — expected, downgrade to debug
+            logger.debug("[fundamentals] %s requires paid Finnhub plan, skipping", endpoint)
+            return None
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:

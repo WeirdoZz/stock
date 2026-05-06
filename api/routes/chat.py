@@ -141,6 +141,9 @@ async def chat(req: ChatRequest):
             from api.routes.data import _run_sync_tracked
             asyncio.create_task(asyncio.to_thread(_run_sync_tracked, ticker))
 
+            # Tell the frontend to add this ticker to the sidebar immediately
+            yield {"data": json.dumps({"type": "ticker_registered", "content": ticker})}
+
             msg = (
                 f"✓ **{ticker}** 已注册到监控列表，首次数据采集已在后台启动（约需 30–60 秒）。\n\n"
                 f"完成后请重新提问，例如「{ticker} 趋势怎么样」。\n\n"
