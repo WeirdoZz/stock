@@ -231,9 +231,12 @@ Sessions expire after 1 hour idle (`TTL_SECONDS = 3600`).
 4. Session fallback: reuse `last_ticker` if no ticker found → marks as follow-up
 
 **Routing logic (in priority order):**
-- 2 tickers detected → `run_comparison_stream()`; `entry.last_ticker` set to `None`
-- Same session + same ticker reused → lightweight context prompt (no tool re-collection)
-- New single ticker → full `run_query_stream()` pipeline
+- 2 registered tickers detected → `run_comparison_stream()`; `entry.last_ticker = None`
+- Single unregistered candidate → validate via `validate_ticker()`; if valid, register + schedule + fire-and-forget sync, return "采集中" message; if invalid, return error
+- Same session + same registered ticker reused → lightweight context prompt (no tool re-collection)
+- New registered ticker → full `run_query_stream()` pipeline
+
+**Dynamic ticker registration:** unknown tickers detected in chat go through `validate_ticker()` (yfinance 5-day history check, ~1s). Valid ones are inserted into `registered_tickers` and added to the live scheduler via `api.main.add_ticker_to_scheduler()`. Comparison flow only triggers on already-registered tickers — first-time registration is single-ticker only.
 
 **Language detection:** `_detect_language()` checks for CJK characters (`\u4e00-\u9fff`) in message.
 
@@ -292,10 +295,10 @@ Base URL: `http://host:9999`
 |---|---|---|
 | `GET` | `/` | Serves `frontend/index.html` |
 | `POST` | `/api/chat` | Streaming analysis. Body: `ChatRequest`. Response: SSE stream. |
-| `GET` | `/api/tickers` | Returns `list[str]` of watched tickers from settings. |
-| `GET` | `/api/status/{ticker}` | Returns `TickerStatus` JSON with DB record counts and staleness. |
-| `POST` | `/api/sync/{ticker}` | Queues background sync. Returns `{"status": "queued"}` immediately. If already running, returns `{"status": "already_running"}` without queuing again. |
-| `GET` | `/api/sync/status/{ticker}` | Returns current sync state: `{"ticker", "status": "idle\|running\|done\|error", "started_at", "finished_at", "error"}`. State is in-memory — resets on server restart. |
+| `GET` | `/api/tickers` | Returns `list[str]` of registered tickers from the `registered_tickers` table (DB-backed, not from `.env`). |
+| `GET` | `/api/status/{ticker}` | Returns `TickerStatus` JSON. 404 if ticker is not registered. |
+| `POST` | `/api/sync/{ticker}` | Queues background sync. 404 if not registered. If already running, returns `{"status": "already_running"}`. |
+| `GET` | `/api/sync/status/{ticker}` | Returns current sync state. 404 if not registered. State is in-memory — resets on server restart. |
 
 ### SSE Event Types (`POST /api/chat`)
 
@@ -384,6 +387,16 @@ Unique constraint: `(ticker, timestamp, interval)`
 | `magnitude` | Float | Absolute % change |
 
 Unique constraint: `(ticker, news_id)`
+
+### `registered_tickers`
+
+| Column | Type | Notes |
+|---|---|---|
+| `ticker` | String(10) PK | Uppercase |
+| `registered_at` | DateTime | UTC |
+| `source` | String(20) | `"env"` (bootstrapped from `WATCHED_TICKERS`) or `"user"` (added via chat) |
+
+Drives `GET /api/tickers`, `_start_scheduler()`, and the comparison/registration logic in `chat.py`. `.env` is treated as a seed list — at startup, every ticker in `settings.ticker_list` is `INSERT OR IGNORE`-ed into this table; thereafter the table is the source of truth.
 
 ### `fundamental_snapshots`
 | Column | Type | Notes |
@@ -540,3 +553,5 @@ PORT=8080 bash start.sh  # custom port
 | Tools cache serves stale data after sync | 20-min TTL survives sync completion | `invalidate_tools_cache(ticker)` called in `_run_sync_tracked` immediately after sync finishes |
 | Sync fails silently when one news source is down | Any exception in `ingest_all_news()` propagated upward | Each source wrapped in `_safe_fetch()` — failure logs a warning and returns 0, others continue |
 | Sync status lost after server restart | `_sync_status` is in-memory only | Expected behavior; use `GET /api/status/{ticker}` (DB-backed) for persistent data freshness info |
+| Asking about an unregistered ticker used to error out | `_extract_ticker` filtered by `settings.ticker_list` | Replaced with `_resolve_ticker()` returning `(ticker, is_registered)`; unregistered candidates go through `validate_ticker()` (yfinance) and are auto-registered if valid |
+| New ticker added at runtime not picked up by scheduler | Scheduler iterated tickers once at startup | Scheduler instance now module-global in `api/main.py`; `add_ticker_to_scheduler()` exposed for runtime job registration |

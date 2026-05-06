@@ -6,7 +6,6 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from api.models import TickerStatus
-from config.settings import settings
 
 router = APIRouter()
 
@@ -16,14 +15,16 @@ _sync_status: dict[str, dict] = {}
 
 @router.get("/api/tickers")
 def list_tickers() -> list[str]:
-    return settings.ticker_list
+    from storage.repository import get_registered_tickers
+    return get_registered_tickers()
 
 
 @router.get("/api/status/{ticker}", response_model=TickerStatus)
 def ticker_status(ticker: str) -> TickerStatus:
+    from storage.repository import is_ticker_registered
     ticker = ticker.upper()
-    if ticker not in settings.ticker_list:
-        raise HTTPException(status_code=404, detail=f"{ticker} is not in the watched list")
+    if not is_ticker_registered(ticker):
+        raise HTTPException(status_code=404, detail=f"{ticker} is not registered")
 
     from storage.database import get_session
     from storage.models import NewsArticle, PriceBar, CorrelationSnapshot
@@ -121,18 +122,20 @@ def _run_sync_tracked(ticker: str) -> None:
 
 @router.get("/api/sync/status/{ticker}")
 def sync_status(ticker: str):
+    from storage.repository import is_ticker_registered
     ticker = ticker.upper()
-    if ticker not in settings.ticker_list:
-        raise HTTPException(status_code=404, detail=f"{ticker} is not in the watched list")
+    if not is_ticker_registered(ticker):
+        raise HTTPException(status_code=404, detail=f"{ticker} is not registered")
     state = _sync_status.get(ticker, {"status": "idle"})
     return {"ticker": ticker, **state}
 
 
 @router.post("/api/sync/{ticker}")
 def sync_ticker(ticker: str, background_tasks: BackgroundTasks):
+    from storage.repository import is_ticker_registered
     ticker = ticker.upper()
-    if ticker not in settings.ticker_list:
-        raise HTTPException(status_code=404, detail=f"{ticker} is not in the watched list")
+    if not is_ticker_registered(ticker):
+        raise HTTPException(status_code=404, detail=f"{ticker} is not registered")
     if _sync_status.get(ticker, {}).get("status") == "running":
         return {"status": "already_running", "ticker": ticker}
     background_tasks.add_task(_run_sync_tracked, ticker)

@@ -2,7 +2,31 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from sqlalchemy import func, case
 from storage.database import get_session
-from storage.models import NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot
+from storage.models import NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot, RegisteredTicker
+
+
+# ── Registered tickers ────────────────────────────────────────────────────────
+
+def get_registered_tickers() -> list[str]:
+    with get_session() as session:
+        rows = session.query(RegisteredTicker.ticker).order_by(RegisteredTicker.ticker).all()
+        return [r[0] for r in rows]
+
+
+def is_ticker_registered(ticker: str) -> bool:
+    with get_session() as session:
+        return session.query(RegisteredTicker).filter_by(ticker=ticker.upper()).first() is not None
+
+
+def register_ticker(ticker: str, source: str = "user") -> bool:
+    """Insert if not exists. Returns True if newly inserted, False if already present."""
+    ticker = ticker.upper()
+    with get_session() as session:
+        existing = session.query(RegisteredTicker).filter_by(ticker=ticker).first()
+        if existing:
+            return False
+        session.add(RegisteredTicker(ticker=ticker, source=source))
+        return True
 
 
 # ── News ──────────────────────────────────────────────────────────────────────

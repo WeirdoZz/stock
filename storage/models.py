@@ -68,6 +68,16 @@ class CorrelationSnapshot(Base):
     )
 
 
+class RegisteredTicker(Base):
+    """Tickers under active sync. Bootstrapped from .env on startup, augmented
+    by user queries about new tickers via the chat interface."""
+    __tablename__ = "registered_tickers"
+
+    ticker = Column(String(10), primary_key=True)
+    registered_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    source = Column(String(20), nullable=False, default="user")  # "env" or "user"
+
+
 class FundamentalSnapshot(Base):
     """Daily snapshot of fundamental metrics for a ticker (from Finnhub)."""
     __tablename__ = "fundamental_snapshots"

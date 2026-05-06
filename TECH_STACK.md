@@ -88,6 +88,7 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 ### yfinance
 - **用途（价格）：** 拉取 OHLCV 历史价格数据（日线 `1d` / 小时线 `1h`）
 - **用途（期权结构）：** `Ticker.option_chain(expiry)` 获取期权链（strike / OI / gamma），计算 Max Pain 和 GEX（无需额外 API Key）
+- **用途（ticker 校验）：** `validate_ticker()` 用 5 天历史数据探测，~1s/次，决定未知 ticker 是否注册到监控列表
 - **去重：** 数据库 unique constraint `(ticker, timestamp, interval)` 防止重复写入
 
 ### Alpha Vantage API

@@ -1,6 +1,7 @@
 """POST /api/chat — streaming analysis via SSE."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -11,7 +12,6 @@ from sse_starlette.sse import EventSourceResponse
 
 from api.models import ChatRequest
 from api import session as sessions
-from config.settings import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,17 +34,32 @@ def _detect_language(text: str) -> str:
     return "Chinese" if _CJK_RE.search(text) else "English"
 
 
-def _extract_ticker(text: str, ticker_list: list):
+def _resolve_ticker(text: str, ticker_list: list) -> tuple[str | None, bool]:
+    """Resolve a single ticker reference in the message.
+
+    Returns (ticker, is_registered):
+      - (T, True)  : found a ticker that's already in the registered list
+      - (T, False) : found exactly one unknown candidate worth validating
+      - (None, _)  : nothing actionable
+    """
+    # Chinese alias takes priority — alias map only contains real tickers
     for alias, ticker in _ALIASES.items():
-        if alias in text and ticker in ticker_list:
-            logger.debug("[chat] ticker via alias: %s -> %s", alias, ticker)
-            return ticker
-    for match in _TICKER_RE.finditer(text):
-        candidate = match.group(1)
-        if candidate in ticker_list:
-            logger.debug("[chat] ticker via regex: %s", candidate)
-            return candidate
-    return None
+        if alias in text:
+            return ticker, ticker in ticker_list
+
+    matches = [m.group(1) for m in _TICKER_RE.finditer(text)]
+    matches = [t for t in matches if len(t) >= 2]  # skip "I", "A"
+
+    # Prefer registered matches
+    for t in matches:
+        if t in ticker_list:
+            return t, True
+
+    # Else: only act if there's a single unknown candidate (avoid ambiguity)
+    unique = list(dict.fromkeys(matches))
+    if len(unique) == 1:
+        return unique[0], False
+    return None, False
 
 
 def _extract_comparison_tickers(text: str, ticker_list: list) -> tuple[str, str] | None:
@@ -65,7 +80,8 @@ def _extract_comparison_tickers(text: str, ticker_list: list) -> tuple[str, str]
 
 @router.post("/api/chat")
 async def chat(req: ChatRequest):
-    ticker_list = settings.ticker_list
+    from storage.repository import get_registered_tickers
+    ticker_list = get_registered_tickers()
     logger.debug("[chat] message=%r  session_id=%r", req.message, req.session_id)
 
     session_id, entry = sessions.get_or_create(req.session_id)
@@ -99,9 +115,37 @@ async def chat(req: ChatRequest):
             return
 
         # ── Single ticker path ───────────────────────────────────────────────
-        ticker = _extract_ticker(req.message, ticker_list)
+        ticker, is_registered = _resolve_ticker(req.message, ticker_list)
         is_followup = False
-        logger.debug("[chat] extracted ticker=%s", ticker)
+        logger.debug("[chat] resolved ticker=%s registered=%s", ticker, is_registered)
+
+        # New ticker → validate via yfinance, register, fire-and-forget sync
+        if ticker is not None and not is_registered:
+            yield {"data": json.dumps({"type": "status", "content": f"检测到新 ticker {ticker}，正在校验..."})}
+            from ingestion.prices.yfinance_client import validate_ticker
+            loop = asyncio.get_event_loop()
+            valid = await loop.run_in_executor(None, validate_ticker, ticker)
+            if not valid:
+                yield {"data": json.dumps({"type": "error", "content": f"输入有误：{ticker} 不是有效的股票代码，请检查后重试。"})}
+                return
+
+            from storage.repository import register_ticker
+            await loop.run_in_executor(None, register_ticker, ticker, "user")
+
+            from api.main import add_ticker_to_scheduler
+            add_ticker_to_scheduler(ticker)
+
+            from api.routes.data import _run_sync_tracked
+            asyncio.create_task(asyncio.to_thread(_run_sync_tracked, ticker))
+
+            msg = (
+                f"✓ **{ticker}** 已注册到监控列表，首次数据采集已在后台启动（约需 30–60 秒）。\n\n"
+                f"完成后请重新提问，例如「{ticker} 趋势怎么样」。\n\n"
+                f"也可以点击侧边栏的 ⟳ 按钮查看进度。"
+            )
+            yield {"data": json.dumps({"type": "chunk", "content": msg})}
+            yield {"data": json.dumps({"type": "done", "content": ""})}
+            return
 
         if ticker is None:
             if entry.last_ticker:

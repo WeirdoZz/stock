@@ -1,9 +1,23 @@
 from __future__ import annotations
+import logging
 import yfinance as yf
 from datetime import datetime, timedelta
 from storage.database import get_session
 from storage.models import PriceBar
 from sqlalchemy.dialects.sqlite import insert
+
+logger = logging.getLogger(__name__)
+
+
+def validate_ticker(ticker: str) -> bool:
+    """Quick check: does this ticker actually exist on yfinance?
+    Returns True if 5d history yields any rows. Used to gate auto-registration."""
+    try:
+        df = yf.Ticker(ticker.upper()).history(period="5d", interval="1d")
+        return not df.empty
+    except Exception as exc:
+        logger.warning("[validate_ticker] %s: %s", ticker, exc)
+        return False
 
 
 def fetch_and_store(ticker: str, days_back: int = 90, interval: str = "1d",
