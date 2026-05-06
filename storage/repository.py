@@ -2,7 +2,118 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from sqlalchemy import func, case
 from storage.database import get_session
-from storage.models import NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot, RegisteredTicker
+from storage.models import (
+    NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot,
+    RegisteredTicker, ChatSession, ChatMessage,
+)
+
+
+# ── Chat sessions ─────────────────────────────────────────────────────────────
+
+def create_chat_session(session_id: str, title: str = "New chat") -> None:
+    with get_session() as s:
+        s.add(ChatSession(id=session_id, title=title))
+
+
+def get_chat_session(session_id: str) -> dict | None:
+    with get_session() as s:
+        row = s.query(ChatSession).filter_by(id=session_id).first()
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "title": row.title,
+            "archived": bool(row.archived),
+            "last_ticker": row.last_ticker,
+            "created_at": row.created_at.isoformat(),
+            "last_active_at": row.last_active_at.isoformat(),
+        }
+
+
+def list_chat_sessions(include_archived: bool = False) -> list[dict]:
+    with get_session() as s:
+        q = s.query(ChatSession)
+        if not include_archived:
+            q = q.filter(ChatSession.archived == 0)
+        rows = q.order_by(ChatSession.last_active_at.desc()).all()
+        return [
+            {
+                "id": r.id,
+                "title": r.title,
+                "archived": bool(r.archived),
+                "last_ticker": r.last_ticker,
+                "created_at": r.created_at.isoformat(),
+                "last_active_at": r.last_active_at.isoformat(),
+            }
+            for r in rows
+        ]
+
+
+def update_chat_session(
+    session_id: str,
+    *,
+    title: str | None = None,
+    archived: bool | None = None,
+    last_ticker: str | None = None,
+    bump_active: bool = False,
+) -> bool:
+    """Update one or more fields. Returns True if the row exists."""
+    with get_session() as s:
+        row = s.query(ChatSession).filter_by(id=session_id).first()
+        if row is None:
+            return False
+        if title is not None:
+            row.title = title
+        if archived is not None:
+            row.archived = 1 if archived else 0
+        if last_ticker is not None:
+            row.last_ticker = last_ticker
+        if bump_active:
+            row.last_active_at = datetime.utcnow()
+        return True
+
+
+def delete_chat_session(session_id: str) -> bool:
+    """Delete a session and all its messages."""
+    with get_session() as s:
+        msg_deleted = s.query(ChatMessage).filter_by(session_id=session_id).delete()
+        sess_deleted = s.query(ChatSession).filter_by(id=session_id).delete()
+        return (sess_deleted + msg_deleted) > 0
+
+
+def add_chat_message(session_id: str, role: str, content: str,
+                     chart_json: str | None = None) -> int:
+    """Append a message to a session. Returns the new row id."""
+    with get_session() as s:
+        m = ChatMessage(
+            session_id=session_id,
+            role=role,
+            content=content,
+            chart_json=chart_json,
+        )
+        s.add(m)
+        s.flush()
+        return m.id
+
+
+def list_chat_messages(session_id: str) -> list[dict]:
+    with get_session() as s:
+        rows = (
+            s.query(ChatMessage)
+            .filter_by(session_id=session_id)
+            .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "role": r.role,
+                "content": r.content,
+                "chart_json": r.chart_json,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
 
 
 # ── Registered tickers ────────────────────────────────────────────────────────

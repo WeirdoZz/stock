@@ -57,3 +57,21 @@ export interface ChatMessage {
   error?: boolean;
   chart?: ChartPayload;  // optional chart attached to an assistant message
 }
+
+// Session history (PR 2)
+export interface ChatSessionMeta {
+  id: string;
+  title: string;
+  archived: boolean;
+  last_ticker: string | null;
+  created_at: string;
+  last_active_at: string;
+}
+
+export interface PersistedMessage {
+  id: number;
+  role: MessageRole;
+  content: string;
+  chart_json: string | null;
+  created_at: string;
+}

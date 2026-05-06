@@ -1,10 +1,17 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useChatStore } from './chat';
+import { api } from '../api/client';
+import type { PersistedMessage } from '../types';
+
+vi.mock('../api/client', () => ({
+  api: { getMessages: vi.fn() },
+}));
 
 describe('chat store', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    vi.mocked(api.getMessages).mockReset();
   });
 
   it('starts empty', () => {
@@ -42,5 +49,45 @@ describe('chat store', () => {
     const ids = new Set(c.messages.map(m => m.id));
     expect(ids.size).toBe(4);
     expect(m1.id).not.toBe(m2.id);
+  });
+
+  it('clear empties messages and sessionId', () => {
+    const c = useChatStore();
+    c.sessionId = 's';
+    c.appendUser('hi');
+    c.clear();
+    expect(c.messages).toEqual([]);
+    expect(c.sessionId).toBeNull();
+  });
+
+  it('hydrate loads persisted messages and parses chart_json', async () => {
+    const persisted: PersistedMessage[] = [
+      { id: 1, role: 'user', content: 'hi', chart_json: null, created_at: 't' },
+      {
+        id: 2, role: 'assistant', content: 'reply',
+        chart_json: '{"mode":"single","tickers":["AAPL"],"prices":{},"sentiment":{}}',
+        created_at: 't',
+      },
+    ];
+    vi.mocked(api.getMessages).mockResolvedValue(persisted);
+
+    const c = useChatStore();
+    await c.hydrate('sess-1');
+
+    expect(c.sessionId).toBe('sess-1');
+    expect(c.messages).toHaveLength(2);
+    expect(c.messages[0].text).toBe('hi');
+    expect(c.messages[1].chart).toEqual({
+      mode: 'single', tickers: ['AAPL'], prices: {}, sentiment: {},
+    });
+  });
+
+  it('hydrate ignores malformed chart_json without crashing', async () => {
+    vi.mocked(api.getMessages).mockResolvedValue([
+      { id: 1, role: 'assistant', content: 'x', chart_json: 'not json', created_at: 't' },
+    ]);
+    const c = useChatStore();
+    await c.hydrate('s');
+    expect(c.messages[0].chart).toBeUndefined();
   });
 });

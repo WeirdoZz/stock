@@ -1,4 +1,4 @@
-import type { TickerStatus, SyncStatus } from '../types';
+import type { TickerStatus, SyncStatus, ChatSessionMeta, PersistedMessage } from '../types';
 
 async function jsonOrNull<T>(p: Promise<Response>): Promise<T | null> {
   try {
@@ -27,5 +27,35 @@ export const api = {
     return jsonOrNull(fetch('/api/sync/' + ticker, { method: 'POST' }));
   },
 
-  // Chat is handled separately via SSE composable, not here.
+  // ── Sessions ──────────────────────────────────────────────────────────────
+  listSessions(includeArchived = false): Promise<ChatSessionMeta[]> {
+    const q = includeArchived ? '?include_archived=true' : '';
+    return jsonOrNull<ChatSessionMeta[]>(fetch('/api/sessions' + q)).then(r => r ?? []);
+  },
+
+  createSession(title?: string): Promise<ChatSessionMeta | null> {
+    return jsonOrNull<ChatSessionMeta>(fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title ?? null }),
+    }));
+  },
+
+  patchSession(id: string, body: { title?: string; archived?: boolean }): Promise<ChatSessionMeta | null> {
+    return jsonOrNull<ChatSessionMeta>(fetch('/api/sessions/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  },
+
+  deleteSession(id: string): Promise<{ deleted: string } | null> {
+    return jsonOrNull(fetch('/api/sessions/' + id, { method: 'DELETE' }));
+  },
+
+  getMessages(id: string): Promise<PersistedMessage[]> {
+    return jsonOrNull<PersistedMessage[]>(fetch(`/api/sessions/${id}/messages`)).then(r => r ?? []);
+  },
+
+  // Chat itself is streamed via SSE (see composables/useSSE.ts).
 };

@@ -27,7 +27,7 @@ _ALIASES = {
 }
 
 _TICKER_RE = re.compile(r"\b([A-Z]{1,5})\b", re.ASCII)
-_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff]")
+_CJK_RE = re.compile(r"[一-鿿぀-ヿ]")
 
 
 def _detect_language(text: str) -> str:
@@ -44,21 +44,17 @@ def _resolve_ticker(text: str, ticker_list: list) -> tuple[str | None, bool]:
 
     Case-insensitive: 'aapl' / 'AAPL' / 'Aapl' are all treated equivalently.
     """
-    # Chinese alias takes priority — alias map only contains real tickers
     for alias, ticker in _ALIASES.items():
         if alias in text:
             return ticker, ticker in ticker_list
 
-    # Uppercase first so lowercase ticker references ('uuuu', 'aapl') get matched.
     matches = [m.group(1) for m in _TICKER_RE.finditer(text.upper())]
-    matches = [t for t in matches if len(t) >= 2]  # skip "I", "A"
+    matches = [t for t in matches if len(t) >= 2]
 
-    # Prefer registered matches
     for t in matches:
         if t in ticker_list:
             return t, True
 
-    # Else: only act if there's a single unknown candidate (avoid ambiguity)
     unique = list(dict.fromkeys(matches))
     if len(unique) == 1:
         return unique[0], False
@@ -99,19 +95,23 @@ async def chat(req: ChatRequest):
         comp = _extract_comparison_tickers(req.message, ticker_list)
         if comp:
             ticker_a, ticker_b = comp
-            entry.messages.append({"role": "user", "content": req.message})
+            sessions.append_message(entry, "user", req.message)
+            sessions.update_title_from_first_message(entry, req.message)
             sessions.trim_messages(entry)
             try:
                 from agent.agent import run_comparison_stream
                 full_response = ""
+                chart_payload = None
                 async for event in run_comparison_stream(ticker_a, ticker_b, reply_language=lang):
                     logger.debug("[chat] comparison event type=%s", event["type"])
                     yield {"data": json.dumps(event)}
                     if event["type"] == "chunk":
                         full_response += event["content"]
-                entry.messages.append({"role": "assistant", "content": full_response})
+                    elif event["type"] == "chart":
+                        chart_payload = event["content"]
+                sessions.append_message(entry, "assistant", full_response, chart_json=chart_payload)
                 entry.last_ticker = None  # no single active ticker after comparison
-                sessions.save(session_id, entry)
+                sessions.save(entry)
             except Exception as exc:
                 logger.error("[chat] comparison exception: %s\n%s", exc, traceback.format_exc())
                 yield {"data": json.dumps({"type": "error", "content": f"Error: {exc}"})}
@@ -141,7 +141,6 @@ async def chat(req: ChatRequest):
             from api.routes.data import _run_sync_tracked
             asyncio.create_task(asyncio.to_thread(_run_sync_tracked, ticker))
 
-            # Tell the frontend to add this ticker to the sidebar immediately
             yield {"data": json.dumps({"type": "ticker_registered", "content": ticker})}
 
             msg = (
@@ -149,6 +148,11 @@ async def chat(req: ChatRequest):
                 f"完成后请重新提问，例如「{ticker} 趋势怎么样」。\n\n"
                 f"也可以点击侧边栏的 ⟳ 按钮查看进度。"
             )
+            sessions.append_message(entry, "user", req.message)
+            sessions.update_title_from_first_message(entry, req.message)
+            sessions.append_message(entry, "assistant", msg)
+            sessions.save(entry)
+
             yield {"data": json.dumps({"type": "chunk", "content": msg})}
             yield {"data": json.dumps({"type": "done", "content": ""})}
             return
@@ -164,10 +168,14 @@ async def chat(req: ChatRequest):
                 yield {"data": json.dumps({"type": "error", "content": f"Which ticker? I track: {tracked}"})}
                 return
 
-        entry.messages.append({"role": "user", "content": req.message})
+        sessions.append_message(entry, "user", req.message)
+        sessions.update_title_from_first_message(entry, req.message)
         sessions.trim_messages(entry)
 
         try:
+            full_response = ""
+            chart_payload: str | None = None
+
             if is_followup and entry.messages:
                 logger.debug("[chat] follow-up path, building lightweight prompt")
                 prior_ctx = "\n".join(
@@ -178,36 +186,27 @@ async def chat(req: ChatRequest):
                 yield {"data": json.dumps({"type": "status", "content": "Thinking..."})}
 
                 from agent.agent import _build_llm_client
-                logger.debug("[chat] building llm client")
                 llm = _build_llm_client()
-                full_response = ""
-                logger.debug("[chat] starting stream_complete (follow-up)")
                 async for chunk in llm.stream_complete(
                     messages=[{"role": "user", "content": prompt}],
                     system_prompt="You are a rigorous stock trend analyst.",
                 ):
-                    logger.debug("[chat] follow-up chunk len=%d", len(chunk))
                     full_response += chunk
                     yield {"data": json.dumps({"type": "chunk", "content": chunk})}
-
-                entry.messages.append({"role": "assistant", "content": full_response})
 
             else:
                 logger.debug("[chat] full pipeline path for ticker=%s", ticker)
                 from agent.agent import run_query_stream
-                logger.debug("[chat] reply_language=%s", lang)
-                full_response = ""
                 async for event in run_query_stream(ticker, reply_language=lang):
-                    logger.debug("[chat] pipeline event type=%s len=%d",
-                                 event["type"], len(event.get("content", "")))
                     yield {"data": json.dumps(event)}
                     if event["type"] == "chunk":
                         full_response += event["content"]
+                    elif event["type"] == "chart":
+                        chart_payload = event["content"]
 
-                entry.messages.append({"role": "assistant", "content": full_response})
-
+            sessions.append_message(entry, "assistant", full_response, chart_json=chart_payload)
             entry.last_ticker = ticker
-            sessions.save(session_id, entry)
+            sessions.save(entry)
             logger.debug("[chat] done, saved session")
 
         except Exception as exc:

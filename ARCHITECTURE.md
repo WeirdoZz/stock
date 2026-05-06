@@ -51,7 +51,8 @@ stock/
 │   ├── session.py            # In-memory session store (TTL 1h, max 20 msgs)
 │   └── routes/
 │       ├── chat.py           # POST /api/chat → SSE stream
-│       └── data.py           # GET /api/tickers, GET /api/status/{ticker}, POST /api/sync/{ticker}, GET /api/sync/status/{ticker}
+│       ├── data.py           # GET /api/tickers, GET /api/status/{ticker}, POST /api/sync/{ticker}, GET /api/sync/status/{ticker}
+│       └── sessions.py       # GET/POST/PATCH/DELETE /api/sessions[/{id}], GET /api/sessions/{id}/messages
 │
 ├── ingestion/                # External data collection
 │   ├── news/
@@ -220,17 +221,22 @@ Contains `ANALYSIS_PROMPT` and `COMPARISON_PROMPT` — templates injected with a
 
 ### `api/session.py`
 
-In-memory session store. **No persistence — clears on server restart.**
+DB-backed session store (PR 2). Backed by `chat_sessions` + `chat_messages`.
 
 ```python
 get_or_create(session_id: str | None) → (session_id: str, SessionEntry)
-save(session_id, entry)
-trim_messages(entry)   # enforces MAX_MESSAGES=20, drops oldest user+assistant pairs
+save(entry)                                 # bumps last_active_at + persists last_ticker
+append_message(entry, role, content, ...)   # writes to DB AND mutates entry.messages
+trim_messages(entry)                        # caps PROMPT_CONTEXT_WINDOW=20 in-memory
+update_title_from_first_message(entry, msg) # auto-titles new sessions on first user msg
 ```
 
-`SessionEntry` fields: `messages: list[dict]`, `last_ticker: str | None`, `last_accessed: float`
+`SessionEntry` fields: `id: str`, `messages: list[dict]`, `last_ticker: str | None`.
 
-Sessions expire after 1 hour idle (`TTL_SECONDS = 3600`).
+Sessions never expire — they live in the DB indefinitely until the user
+archives or deletes them via the history rail. The in-memory `messages` list
+is only the working window for the LLM prompt; the DB always has the full
+log via `list_chat_messages(session_id)`.
 
 ---
 
@@ -311,6 +317,12 @@ Base URL: `http://host:9999`
 | `GET` | `/api/status/{ticker}` | Returns `TickerStatus` JSON. 404 if ticker is not registered. |
 | `POST` | `/api/sync/{ticker}` | Queues background sync. 404 if not registered. If already running, returns `{"status": "already_running"}`. |
 | `GET` | `/api/sync/status/{ticker}` | Returns current sync state. 404 if not registered. State is in-memory — resets on server restart. |
+| `GET` | `/api/sessions` | List chat sessions ordered by `last_active_at desc`. `?include_archived=true` to include archived. |
+| `POST` | `/api/sessions` | Create a new session. Body: `{title?: string}`. Returns the created row. |
+| `GET` | `/api/sessions/{id}` | Single session metadata. 404 if not found. |
+| `PATCH` | `/api/sessions/{id}` | Body: `{title?, archived?}`. Updates the session and returns it. 404 if not found. |
+| `DELETE` | `/api/sessions/{id}` | Hard-delete the session and all its messages. |
+| `GET` | `/api/sessions/{id}/messages` | Returns the persisted message log (oldest first). 404 if session missing. |
 
 ### SSE Event Types (`POST /api/chat`)
 
@@ -401,6 +413,32 @@ Unique constraint: `(ticker, timestamp, interval)`
 
 Unique constraint: `(ticker, news_id)`
 
+### `chat_sessions`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String(36) PK | UUID4 |
+| `title` | String(200) | Auto-set from first user message; user-renamable |
+| `archived` | Integer | 0 or 1; archived rows hidden from default list |
+| `last_ticker` | String(10) | Carried across follow-ups (replaces in-memory state) |
+| `created_at` | DateTime | UTC |
+| `last_active_at` | DateTime | Bumped on every save; drives sort order |
+
+Index: `(archived, last_active_at)` for the default-list query.
+
+### `chat_messages`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | Integer PK | Auto-increment |
+| `session_id` | String(36) | FK → `chat_sessions.id` (no ON DELETE; we cascade in repo) |
+| `role` | String(10) | `'user'` or `'assistant'` |
+| `content` | Text | Plain text or markdown |
+| `chart_json` | Text | Optional serialized `ChartPayload` (for assistant messages) |
+| `created_at` | DateTime | UTC |
+
+Index: `(session_id, created_at)` for in-order replay.
+
 ### `registered_tickers`
 
 | Column | Type | Notes |
@@ -478,9 +516,15 @@ Both Zoom and Aliyun backends use `verify=False` in their HTTP clients due to co
 
 Vite + Vue 3 + TypeScript + Tailwind SPA under `frontend/`. Built artefacts in `frontend/dist/` are served by FastAPI; the dev server (`npm run dev`) proxies `/api` to the FastAPI backend on port 9999.
 
-**State:** Pinia. Two stores:
+**Layout:** three columns — left ticker sidebar, center chat panel, right
+session history rail (PR 2). The history rail lists past conversations, lets
+the user create new / archive / delete / rename sessions; clicking a row
+hydrates the chat panel from `/api/sessions/{id}/messages`.
+
+**State:** Pinia. Three stores:
 - `stores/tickers.ts` — sidebar state (one row per registered ticker, sync polling timers, register-on-the-fly via SSE).
-- `stores/chat.ts` — server-issued `session_id`, message log, streaming flag.
+- `stores/chat.ts` — active `session_id`, in-memory message log, streaming flag, hydrate-from-DB.
+- `stores/sessions.ts` — history rail list, `activeId` (persisted in `localStorage`), archive/delete/rename actions.
 
 **SSE parsing (`composables/useSSE.ts`):**
 Uses `fetch()` + `ReadableStream` (not `EventSource`) because SSE over POST isn't supported by the native EventSource API.

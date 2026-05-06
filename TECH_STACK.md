@@ -38,9 +38,9 @@
 ## 数据存储
 
 ### SQLite + SQLAlchemy ORM
-- **用途：** 存储结构化数据（价格、新闻、相关性快照）
+- **用途：** 存储结构化数据（价格、新闻、相关性快照、基本面、ticker 注册、聊天会话）
 - **文件路径：** `data/stock.db`（`DB_PATH` 可配置）
-- **表：** `news_articles`、`price_bars`、`correlation_snapshots`
+- **表：** `news_articles`、`price_bars`、`correlation_snapshots`、`fundamental_snapshots`、`registered_tickers`、`chat_sessions`、`chat_messages`
 - **连接池：** `pool_size=5, max_overflow=10, pool_pre_ping=True`
 - **WAL 模式：** 启动时通过 `@event.listens_for(engine, "connect")` 执行 `PRAGMA journal_mode=WAL`，允许读写并发；`PRAGMA synchronous=NORMAL` 兼顾性能和持久性；`PRAGMA cache_size=-32000` 分配 32MB 页缓存
 - **为什么 SQLite：** 单机部署，无需独立数据库服务，文件直接 SFTP 备份

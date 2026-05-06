@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api.routes.chat import router as chat_router
 from api.routes.data import router as data_router
+from api.routes.sessions import router as sessions_router
 
 app = FastAPI(title="Stock Analysis API")
 
@@ -27,6 +28,7 @@ app.add_middleware(
 
 app.include_router(chat_router)
 app.include_router(data_router)
+app.include_router(sessions_router)
 
 # ── Frontend (Vite-built Vue 3 SPA) ─────────────────────────────────────────
 # `frontend/dist` is produced by `npm run build` and contains the compiled

@@ -1,6 +1,7 @@
 import type { ChartPayload, ChatMessage, SSEEvent } from '../types';
 import { useChatStore } from '../stores/chat';
 import { useTickersStore } from '../stores/tickers';
+import { useSessionsStore } from '../stores/sessions';
 import { parseSSEBuffer } from '../lib/sse';
 
 interface SendOptions {
@@ -59,6 +60,7 @@ export function applyEvent(
 export function useSSE() {
   const chat = useChatStore();
   const tickers = useTickersStore();
+  const sessionsStore = useSessionsStore();
 
   async function send({ message }: SendOptions) {
     if (chat.streaming) return;
@@ -66,8 +68,13 @@ export function useSSE() {
 
     chat.appendUser(message);
     const assistantMsg = chat.startAssistant();
+    const previousSessionId = chat.sessionId;
     const ctx = {
-      setSessionId: (id: string) => { chat.sessionId = id; },
+      setSessionId: (id: string) => {
+        chat.sessionId = id;
+        // First message of a brand-new session → tell the history rail to refresh
+        if (!previousSessionId) sessionsStore.notePendingActive(id);
+      },
       registerTicker: (t: string) => tickers.registerNew(t),
     };
 

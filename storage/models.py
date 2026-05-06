@@ -68,6 +68,40 @@ class CorrelationSnapshot(Base):
     )
 
 
+class ChatSession(Base):
+    """Persistent chat conversation. One row per user-visible session in the
+    history sidebar. `archived = 1` hides it from the default list without
+    deleting the messages."""
+    __tablename__ = "chat_sessions"
+
+    id = Column(String(36), primary_key=True)             # uuid4
+    title = Column(String(200), nullable=False, default="New chat")
+    archived = Column(Integer, nullable=False, default=0) # 0 or 1
+    last_ticker = Column(String(10))                      # carried across follow-ups
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_active_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_chat_sessions_active", "archived", "last_active_at"),
+    )
+
+
+class ChatMessage(Base):
+    """One user or assistant message inside a ChatSession."""
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String(36), nullable=False)
+    role = Column(String(10), nullable=False)             # 'user' | 'assistant'
+    content = Column(Text, nullable=False)
+    chart_json = Column(Text)                             # optional serialized chart payload
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_chat_messages_session", "session_id", "created_at"),
+    )
+
+
 class RegisteredTicker(Base):
     """Tickers under active sync. Bootstrapped from .env on startup, augmented
     by user queries about new tickers via the chat interface."""
