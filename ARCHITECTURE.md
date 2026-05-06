@@ -83,8 +83,20 @@ stock/
 ├── scheduler/
 │   └── jobs.py               # _sync_ticker() sync logic, run_scheduler() (CLI use only)
 │
-├── frontend/
-│   └── index.html            # Single-file UI (no build step, vanilla JS + marked.js CDN)
+├── frontend/                 # Vite + Vue 3 + TypeScript + Tailwind SPA
+│   ├── package.json
+│   ├── vite.config.ts        # Dev server proxies /api → :9999
+│   ├── index.html            # Vite entry (mounts <div id="app"/>)
+│   ├── src/
+│   │   ├── main.ts           # createApp + Pinia
+│   │   ├── App.vue           # Sidebar + ChatPanel layout
+│   │   ├── style.css         # Tailwind directives + markdown styles
+│   │   ├── api/client.ts     # REST wrapper (tickers, status, sync)
+│   │   ├── stores/           # Pinia: tickers.ts, chat.ts
+│   │   ├── composables/      # useSSE.ts (POST + ReadableStream parser)
+│   │   ├── components/       # Sidebar, ChatPanel, MessageBubble, Charts, InputBox
+│   │   └── types/index.ts    # SSEEvent, ChatMessage, ChartPayload, etc.
+│   └── dist/                 # Build output (gitignored, served by FastAPI)
 │
 ├── cli.py                    # Click CLI: query / sync / ingest / status / watch
 ├── start.sh                  # Ubuntu one-shot startup script
@@ -464,29 +476,32 @@ Both Zoom and Aliyun backends use `verify=False` in their HTTP clients due to co
 
 ## 9. Frontend
 
-`frontend/index.html` — single file, no build step, no npm.
+Vite + Vue 3 + TypeScript + Tailwind SPA under `frontend/`. Built artefacts in `frontend/dist/` are served by FastAPI; the dev server (`npm run dev`) proxies `/api` to the FastAPI backend on port 9999.
 
-**Dependencies (CDN):**
-- `marked.js` — markdown rendering of LLM analysis output
+**State:** Pinia. Two stores:
+- `stores/tickers.ts` — sidebar state (one row per registered ticker, sync polling timers, register-on-the-fly via SSE).
+- `stores/chat.ts` — server-issued `session_id`, message log, streaming flag.
 
-**SSE Parsing:**
-Uses `fetch()` + `ReadableStream` (not `EventSource`) because SSE over POST is not supported by the native `EventSource` API.
+**SSE parsing (`composables/useSSE.ts`):**
+Uses `fetch()` + `ReadableStream` (not `EventSource`) because SSE over POST isn't supported by the native EventSource API.
 
-**Critical:** `sse-starlette` sends `\r\n\r\n` as event boundaries. The frontend normalizes `\r\n` → `\n` before splitting on `\n\n`. Do not remove this normalization step.
+**Critical:** `sse-starlette` sends `\r\n\r\n` as event boundaries. The composable normalises `\r\n` → `\n` before splitting on `\n\n`. Do not remove this normalisation.
 
-**Session management:** `session_id` received in the first `type=session` event is stored in a JS variable and sent back with every subsequent request.
+Event handling matches the API's SSE event types one-for-one (`session`, `status`, `chunk`, `chart`, `ticker_registered`, `done`, `error`); each updates the active assistant message or the tickers store.
 
-**Sidebar (ticker list):**
-Each ticker row shows: `[ticker name] [last sync date] [⟳ sync button]`.
-- Date is fetched from `GET /api/status/{ticker}` on page load; red if `days_stale >= 1`, "未同步" (red) if never synced.
-- Clicking ⟳ calls `POST /api/sync/{ticker}`, then polls `GET /api/sync/status/{ticker}` every 2s until `status != "running"`, then refreshes the date display.
-- Sync button shows a CSS spin animation while running.
+**Sidebar (`components/Sidebar.vue`):**
+Each ticker row shows `[ticker] [last sync date / "同步中"] [⟳ sync button]`.
+- Date pulled from `GET /api/status/{ticker}` on first load; red if `days_stale >= 1`, "未同步" (red) if never synced.
+- Clicking ⟳ calls `POST /api/sync/{ticker}`, then polls `GET /api/sync/status/{ticker}` every 2 s until `status != "running"`, then re-fetches `/api/status/{ticker}` to refresh the date.
+- Spin animation (`@keyframes spin`) while running.
 
-**Chart rendering (`renderCharts(msgEl, chartData)`):**
-Called when a `type: "chart"` SSE event arrives. Appends a `.chart-wrap` div as a sibling to the text bubble (so `done`'s markdown re-render doesn't overwrite charts).
-- `mode: "single"` → two Chart.js canvases: 14-day close price (line, filled) + 7-day sentiment (bar, green/red by sign)
-- `mode: "comparison"` → two Chart.js canvases: normalized % change from day 1 (two lines) + side-by-side daily sentiment bars
-- Uses Chart.js 4 from CDN (`chart.umd.min.js`). No build step.
+**Chart rendering (`components/Charts.vue`):**
+Renders inline below an assistant bubble whenever the message has a `chart` payload. Two `<canvas>`es (price + sentiment); destroyed/recreated on prop change.
+- `mode: "single"` → 14-day close price (filled line) + 7-day sentiment (bars; green if positive, red if negative).
+- `mode: "comparison"` → normalised % change from day 1 (multi-line) + side-by-side sentiment bars.
+- Uses `chart.js` from npm (no CDN).
+
+**Markdown:** `marked` (npm) — `MessageBubble.vue` calls `marked.parse(rawText)` and renders into a `.bubble-md` container. Status placeholders (the italic "Collecting market data…" line) live in the bubble's wrapper, not inside the markdown body, so re-renders don't clobber them.
 
 ---
 

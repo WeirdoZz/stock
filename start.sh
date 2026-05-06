@@ -121,6 +121,34 @@ esac
 # ── Data directory ────────────────────────────────────────────────────────────
 mkdir -p data
 
+# ── Frontend build ────────────────────────────────────────────────────────────
+# Builds the Vite/Vue app into frontend/dist/. Skipped if the source hasn't
+# changed since the last build (md5 over package.json + src/).
+if [ -d "frontend" ] && [ -f "frontend/package.json" ]; then
+    if ! command -v npm &>/dev/null; then
+        warn "npm not found — frontend won't be built. Install Node.js to enable the UI."
+    else
+        FRONT_MARKER="frontend/.last_build_hash"
+        FRONT_HASH=$(
+            { md5sum frontend/package.json 2>/dev/null
+              find frontend/src frontend/index.html frontend/vite.config.ts frontend/tailwind.config.js \
+                   frontend/postcss.config.js -type f 2>/dev/null | sort | xargs md5sum 2>/dev/null
+            } | md5sum | cut -d' ' -f1
+        )
+        SAVED_FRONT=$(cat "$FRONT_MARKER" 2>/dev/null || echo "")
+        if [ ! -d "frontend/node_modules" ] || [ "$FRONT_HASH" != "$SAVED_FRONT" ] || [ ! -d "frontend/dist" ]; then
+            info "Building frontend (npm install + build)..."
+            (cd frontend && [ ! -d node_modules ] && npm install --silent || true)
+            (cd frontend && npm install --silent)
+            (cd frontend && npm run build)
+            echo "$FRONT_HASH" > "$FRONT_MARKER"
+            info "Frontend built → frontend/dist/"
+        else
+            info "Frontend already up to date, skipping build."
+        fi
+    fi
+fi
+
 # ── Start ─────────────────────────────────────────────────────────────────────
 info "Starting Stock Analysis API on http://${HOST}:${PORT}"
 info "Press Ctrl+C to stop."

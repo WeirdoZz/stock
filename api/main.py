@@ -6,7 +6,9 @@ from config.settings import settings
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO),
                     format="%(asctime)s %(levelname)s %(message)s")
 
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,7 +28,17 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(data_router)
 
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
+# ── Frontend (Vite-built Vue 3 SPA) ─────────────────────────────────────────
+# `frontend/dist` is produced by `npm run build` and contains the compiled
+# index.html plus hashed asset bundles under `dist/assets/`.
+_FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+if (_FRONTEND_DIST / "assets").exists():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(_FRONTEND_DIST / "assets")),
+        name="assets",
+    )
 
 # Module-global so chat.py can register new tickers on the live scheduler.
 _scheduler = None
@@ -35,7 +47,13 @@ _cron_expr: str | None = None
 
 @app.get("/")
 def index():
-    return FileResponse("frontend/index.html")
+    index_path = _FRONTEND_DIST / "index.html"
+    if not index_path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail="Frontend not built. Run `cd frontend && npm install && npm run build`.",
+        )
+    return FileResponse(str(index_path))
 
 
 @app.on_event("startup")

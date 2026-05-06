@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f7f7f8;
+  color: #1a1a1a;
+}
+
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spinning { animation: spin 1s linear infinite; }
+
+/* Markdown rendered inside assistant bubbles. Tailwind doesn't reset
+   <h1>/<h2>/... so we keep some hand-written rules for content styling. */
+.bubble-md h1, .bubble-md h2, .bubble-md h3 { margin: .8em 0 .4em; font-weight: 600; }
+.bubble-md h1 { font-size: 1.25em; }
+.bubble-md h2 { font-size: 1.15em; }
+.bubble-md h3 { font-size: 1.05em; }
+.bubble-md p { margin: .4em 0; }
+.bubble-md ul, .bubble-md ol { padding-left: 1.4em; margin: .4em 0; }
+.bubble-md code { background: #f3f4f6; padding: 1px 4px; border-radius: 4px; font-size: 12px; }
+.bubble-md pre { background: #f3f4f6; padding: 10px; border-radius: 6px; overflow-x: auto; margin: .5em 0; }
+.bubble-md pre code { background: none; padding: 0; }
+.bubble-md table { border-collapse: collapse; width: 100%; margin: .5em 0; font-size: 13px; }
+.bubble-md th, .bubble-md td { border: 1px solid #e5e5e5; padding: 6px 10px; }
+.bubble-md th { background: #f9fafb; }

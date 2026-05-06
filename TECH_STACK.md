@@ -16,8 +16,8 @@
 | 嵌入模型 | sentence-transformers | ≥ 3.0 |
 | LLM 接入 | Zoom AI / Anthropic / Aliyun DashScope | — |
 | 数据采集 | yfinance, Alpha Vantage API, Finnhub API | — |
-| 前端 | 纯 HTML + Vanilla JS | 无构建步骤 |
-| 图表 | Chart.js 4 | CDN，无 npm |
+| 前端 | Vue 3 + Vite + TypeScript + Tailwind | Pinia 状态管理 |
+| 图表 | Chart.js 4 | npm 安装，按需注册 |
 | 定时任务 | APScheduler | ≥ 3.10 |
 
 ---
@@ -145,21 +145,37 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 
 ## 前端
 
-### 纯 HTML + Vanilla JS（无框架、无构建）
-- **文件：** `frontend/index.html`（单文件）
-- **Markdown 渲染：** `marked.js`（CDN）
-- **图表渲染：** `Chart.js 4`（CDN，`chart.umd.min.js`）— 无需 npm/构建
-- **流式接收：** `fetch()` + `ReadableStream`（非 `EventSource`，因为 SSE over POST 不受原生 API 支持）
-- **侧边栏功能：**
-  - 启动时并行请求 `/api/status/{ticker}` 和 `/api/sync/status/{ticker}`
-  - 显示最后同步日期，超过 1 天标红
-  - ⟳ 按钮触发 sync，轮询进度，完成后自动刷新日期
+### Vue 3 + Vite + TypeScript + Tailwind
+
+- **入口：** `frontend/index.html`（仅挂 `<div id="app">`），真正的 UI 在 `frontend/src/`
+- **构建：** Vite 6（`npm run build` 输出到 `frontend/dist/`，由 FastAPI mount `/assets` + 根路径返回 `index.html`）
+- **开发服务器：** `npm run dev`（端口 5173，自动 proxy `/api` → `localhost:9999`）
+- **状态管理：** Pinia 2，两个 store：
+  - `stores/tickers.ts` — 侧边栏 ticker 列表 + sync 轮询定时器
+  - `stores/chat.ts` — `session_id` + 消息日志 + streaming flag
+- **SSE 流式接收：** `composables/useSSE.ts` 用 `fetch()` + `ReadableStream` 解析 `\r\n\r\n` 事件边界
+- **样式：** Tailwind 3 utility 优先；markdown 渲染区域用 `.bubble-md` 自定义类保留 `<h1>/<table>` 等基础样式
+- **TypeScript 严格模式：** `strict: true` + `noUnusedLocals/Parameters`，`vue-tsc -b` 在构建前做类型检查
+
+### 主要 npm 依赖
+
+| 包 | 用途 |
+|---|---|
+| `vue` 3.5+ | 组件框架 |
+| `pinia` 2+ | 全局状态 |
+| `chart.js` 4+ | 价格 / 情感图（按需 `register(...registerables)`） |
+| `marked` 14+ | LLM 输出的 markdown 渲染 |
+| `tailwindcss` 3+ | 样式 |
+| `vite` 6+ + `@vitejs/plugin-vue` | 构建 + dev server |
+| `vue-tsc` 2+ | Vue 文件类型检查 |
 
 ### Chart.js 使用模式
-- 每次 `type: "chart"` SSE 事件到达时，调用 `renderCharts(msgEl, chartData)` 动态创建 `<canvas>` 并初始化 Chart 实例
-- 图表容器挂在 `.msg` 元素上（而非 `.bubble`），避免被 `done` 事件的 `innerHTML` 重写覆盖
+- `Charts.vue` 组件接收 `ChartPayload`，在 `onMounted` / `watch(props.chart)` 时销毁旧实例并重建
 - **单 ticker：** 14 天收盘价折线图 + 7 天情感柱状图（正绿负红）
 - **对比模式：** 归一化百分比折线对比图 + 双 ticker 情感柱状对比图
+
+### 构建集成（start.sh）
+启动时检查 `frontend/{package.json,src/}` md5 hash，仅当变更或 `dist/` 缺失才跑 `npm install + npm run build`。SFTP 流程：本地保存触发自动上传 → 远程 `start.sh` 检测变更并重建。
 
 ---
 
