@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from sqlalchemy import func, case
 from storage.database import get_session
-from storage.models import NewsArticle, PriceBar, CorrelationSnapshot
+from storage.models import NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot
 
 
 # ── News ──────────────────────────────────────────────────────────────────────
@@ -146,6 +146,70 @@ def get_latest_news_date(ticker: str) -> datetime | None:
             .scalar()
         )
         return result
+
+
+def get_latest_fundamentals(ticker: str) -> dict | None:
+    """Return the most recent FundamentalSnapshot for ticker, or None."""
+    with get_session() as session:
+        row = (
+            session.query(FundamentalSnapshot)
+            .filter(FundamentalSnapshot.ticker == ticker.upper())
+            .order_by(FundamentalSnapshot.fetched_at.desc())
+            .first()
+        )
+        if not row:
+            return None
+        return {
+            "ticker": row.ticker,
+            "fetched_at": row.fetched_at.isoformat(),
+            "valuation": {
+                "pe_ttm":         row.pe_ttm,
+                "pb_quarterly":   row.pb_quarterly,
+                "ps_ttm":         row.ps_ttm,
+                "ev_ebitda_ttm":  row.ev_ebitda_ttm,
+                "dividend_yield": row.dividend_yield,
+            },
+            "profitability": {
+                "roe_ttm":             row.roe_ttm,
+                "roa_ttm":             row.roa_ttm,
+                "gross_margin_ttm":    row.gross_margin_ttm,
+                "operating_margin_ttm": row.operating_margin_ttm,
+                "net_margin_ttm":      row.net_margin_ttm,
+            },
+            "growth": {
+                "revenue_growth_yoy": row.revenue_growth_yoy,
+                "eps_growth_yoy":     row.eps_growth_yoy,
+                "revenue_growth_3y":  row.revenue_growth_3y,
+                "eps_growth_3y":      row.eps_growth_3y,
+            },
+            "financial_health": {
+                "current_ratio":    row.current_ratio,
+                "debt_to_equity":   row.debt_to_equity,
+                "free_cash_flow_ttm": row.free_cash_flow_ttm,
+            },
+            "market": {
+                "week_52_high": row.week_52_high,
+                "week_52_low":  row.week_52_low,
+                "beta":         row.beta,
+                "market_cap":   row.market_cap,
+            },
+            "analyst_consensus": {
+                "strong_buy":   row.analyst_strong_buy,
+                "buy":          row.analyst_buy,
+                "hold":         row.analyst_hold,
+                "sell":         row.analyst_sell,
+                "strong_sell":  row.analyst_strong_sell,
+                "target_mean":  row.analyst_target_mean,
+                "target_high":  row.analyst_target_high,
+                "target_low":   row.analyst_target_low,
+            },
+            "earnings": {
+                "eps_actual":        row.eps_actual,
+                "eps_estimate":      row.eps_estimate,
+                "eps_surprise_pct":  row.eps_surprise_pct,
+                "next_earnings_date": row.next_earnings_date,
+            },
+        }
 
 
 def get_daily_sentiment(ticker: str, days: int = 7) -> list[dict]:

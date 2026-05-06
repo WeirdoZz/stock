@@ -94,6 +94,9 @@ def _run_sync(ticker: str) -> None:
     compute_correlations(ticker)
     embed_pending(ticker=ticker)
 
+    from ingestion.fundamentals.finnhub_fundamentals import fetch_and_store as fetch_fundamentals
+    fetch_fundamentals(ticker)
+
 
 def _run_sync_tracked(ticker: str) -> None:
     _sync_status[ticker] = {

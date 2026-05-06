@@ -38,6 +38,9 @@ def _sync_ticker(ticker: str) -> None:
     c = compute_correlations(ticker)
     e = embed_pending(ticker=ticker)
 
+    from ingestion.fundamentals.finnhub_fundamentals import fetch_and_store as fetch_fundamentals
+    fetch_fundamentals(ticker)
+
     print(f"  {ticker}: +{p} bars, +{counts['total']} articles, "
           f"+{c} correlations, +{e} embeddings")
 

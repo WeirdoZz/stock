@@ -213,9 +213,20 @@ def _collect_tools(ticker: str, verbose: bool) -> dict:
     def _insider():
         return "insider_transactions", get_insider_transactions(ticker)
 
+    def _fundamentals():
+        from storage.repository import get_latest_fundamentals
+        return "fundamentals", get_latest_fundamentals(ticker) or {}
+
+    def _options_struct():
+        from ingestion.prices.options_structure import get_options_structure
+        return "options_structure", get_options_structure(ticker)
+
     results = {"news": news_result}
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(fn) for fn in (_similar, _prices, _corr, _pcr, _insider)]
+    with ThreadPoolExecutor(max_workers=7) as executor:
+        futures = [
+            executor.submit(fn)
+            for fn in (_similar, _prices, _corr, _pcr, _insider, _fundamentals, _options_struct)
+        ]
         for future in futures:
             key, value = future.result()
             results[key] = value
@@ -283,7 +294,9 @@ async def _run_query_async(ticker: str, verbose: bool = False, reply_language: s
         similar_json=json.dumps(tool_data["similar"], indent=2),
         prices_json=json.dumps(tool_data["prices"], indent=2),
         corr_json=json.dumps(tool_data["correlation_stats"], indent=2),
+        fundamentals_json=json.dumps(tool_data.get("fundamentals", {}), indent=2),
         pcr_json=json.dumps(tool_data["put_call_ratio"], indent=2),
+        options_structure_json=json.dumps(tool_data.get("options_structure", {}), indent=2),
         insider_json=json.dumps(tool_data["insider_transactions"], indent=2),
     )
 
@@ -386,7 +399,9 @@ async def run_query_stream(ticker: str, verbose: bool = False, reply_language: s
         similar_json=json.dumps(tool_data["similar"], indent=2),
         prices_json=json.dumps(tool_data["prices"], indent=2),
         corr_json=json.dumps(tool_data["correlation_stats"], indent=2),
+        fundamentals_json=json.dumps(tool_data.get("fundamentals", {}), indent=2),
         pcr_json=json.dumps(tool_data["put_call_ratio"], indent=2),
+        options_structure_json=json.dumps(tool_data.get("options_structure", {}), indent=2),
         insider_json=json.dumps(tool_data["insider_transactions"], indent=2),
     )
     llm = _build_llm_client()

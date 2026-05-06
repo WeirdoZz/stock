@@ -24,7 +24,7 @@
 ## 1. Project Overview
 
 A stock trend analysis system that:
-- **Collects** price data (yfinance), news (Alpha Vantage, Finnhub), options sentiment, and insider transactions
+- **Collects** price data (yfinance), news (Alpha Vantage, Finnhub), options sentiment, insider transactions, fundamental data (Finnhub), and options market structure (Max Pain + GEX via yfinance)
 - **Stores** everything in SQLite + ChromaDB (vector search)
 - **Analyzes** via a single-turn LLM call with all data pre-collected (no multi-turn agentic loop)
 - **Serves** analysis through a FastAPI backend with SSE streaming
@@ -59,9 +59,13 @@ stock/
 │   │   ├── alpha_vantage_news.py
 │   │   ├── finnhub_news.py   # Also provides get_insider_transactions()
 │   │   └── financial_juice.py
-│   └── prices/
-│       ├── yfinance_client.py    # OHLCV price bars → fetch_and_store()
-│       └── options_sentiment.py  # get_put_call_ratio()
+│   ├── prices/
+│   │   ├── yfinance_client.py    # OHLCV price bars → fetch_and_store()
+│   │   ├── options_sentiment.py  # get_put_call_ratio() (6h cache)
+│   │   └── options_structure.py  # get_options_structure() → Max Pain + GEX (1h cache)
+│   └── fundamentals/
+│       ├── __init__.py
+│       └── finnhub_fundamentals.py  # fetch_and_store() → FundamentalSnapshot
 │
 ├── analysis/                 # Post-ingestion analytics
 │   ├── correlator.py         # Links news articles to subsequent price moves
@@ -69,7 +73,7 @@ stock/
 │
 ├── storage/                  # Persistence layer
 │   ├── database.py           # SQLAlchemy engine, init_db(), get_session()
-│   ├── models.py             # ORM models: NewsArticle, PriceBar, CorrelationSnapshot
+│   ├── models.py             # ORM models: NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot
 │   ├── repository.py         # All DB query functions
 │   └── vector_store.py       # ChromaDB wrapper: embed_articles(), search_similar()
 │
@@ -105,12 +109,15 @@ api/routes/chat.py
 agent/agent.py: run_query_stream(ticker, reply_language)
   ├─ Yield {"type": "status", "content": "Collecting market data..."}
   ├─ run_in_executor → _run_all_tools(ticker)          ← sync, runs in thread pool
-  │     ├─ execute_tool("fetch_current_news")          → SQLite query
-  │     ├─ execute_tool("search_similar_historical_events") → ChromaDB search
-  │     ├─ execute_tool("get_price_history")           → SQLite query
-  │     ├─ execute_tool("get_correlation_stats")       → SQLite query
-  │     ├─ get_put_call_ratio(ticker)                  → yfinance options chain
-  │     └─ get_insider_transactions(ticker)            → Finnhub API
+  │     ├─ [serial] execute_tool("fetch_current_news")          → SQLite query
+  │     └─ [parallel, 7 workers via ThreadPoolExecutor]
+  │           ├─ execute_tool("search_similar_historical_events") → ChromaDB
+  │           ├─ execute_tool("get_price_history")               → SQLite
+  │           ├─ execute_tool("get_correlation_stats")           → SQLite
+  │           ├─ get_put_call_ratio(ticker)                      → yfinance options chain
+  │           ├─ get_insider_transactions(ticker)                → Finnhub API
+  │           ├─ get_latest_fundamentals(ticker)                 → SQLite (FundamentalSnapshot)
+  │           └─ get_options_structure(ticker)                   → yfinance option_chain (Max Pain + GEX)
   ├─ Yield {"type": "status", "content": "Analyzing with AI..."}
   ├─ Build ANALYSIS_PROMPT with all data + reply_language
   └─ LLM.stream_complete() → yield {"type": "chunk", "content": "..."} per token
@@ -121,7 +128,7 @@ agent/agent.py: run_query_stream(ticker, reply_language)
 ```
 Trigger: scheduler (auto on startup) OR CLI sync OR POST /api/sync/{ticker}
   │
-  ▼  (status tracked in api/routes/data.py:_sync_status dict)
+  ▼  (status tracked in api/routes/data.py:_sync_status dict when via API)
 ingestion/prices/yfinance_client.py → fetch_and_store()     → PriceBar table
 ingestion/news/aggregator.py → ingest_all_news()            → NewsArticle table
   ├─ alpha_vantage_news.py  (isolated — failure logs warning, continues)
@@ -129,6 +136,12 @@ ingestion/news/aggregator.py → ingest_all_news()            → NewsArticle ta
   └─ finnhub_news.py        (isolated — failure logs warning, continues)
 analysis/correlator.py → compute_correlations()             → CorrelationSnapshot table
 analysis/embedder.py → embed_pending()                      → ChromaDB
+ingestion/fundamentals/finnhub_fundamentals.py → fetch_and_store() → FundamentalSnapshot table
+  ├─ /stock/metric?metric=all    → valuation, profitability, growth, health, market metrics
+  ├─ /stock/recommendation       → analyst buy/hold/sell counts
+  ├─ /stock/price-target         → mean/high/low price targets
+  ├─ /stock/earnings             → EPS actual/estimate/surprise (most recent quarter)
+  └─ /calendar/earnings          → next earnings date (next 90 days)
 ```
 
 ---
@@ -145,7 +158,7 @@ analysis/embedder.py → embed_pending()                      → ChromaDB
 | `run_query_stream` | `async gen (ticker, verbose, reply_language)` | Single-ticker async generator. Yields `status` → `chunks` → `chart` → `done`. Guards against missing data: yields `error` and returns if no price data exists. |
 | `run_comparison_stream` | `async gen (ticker_a, ticker_b, verbose, reply_language)` | Two-ticker comparison. Collects both tickers' data in parallel via `asyncio.gather`, then streams `COMPARISON_PROMPT` to LLM. Yields same event types as `run_query_stream`. |
 | `_run_all_tools` | `(ticker, verbose) → dict` | Cache wrapper (20-min TTL, key = ticker). Returns cached result on hit; calls `_collect_tools` on miss and stores result. |
-| `_collect_tools` | `(ticker, verbose) → dict` | Actual data collection: news fetched first (serial), then similar/prices/corr/PCR/insider run in parallel via `ThreadPoolExecutor(max_workers=5)`. |
+| `_collect_tools` | `(ticker, verbose) → dict` | Actual data collection: news fetched first (serial), then 7 tasks run in parallel via `ThreadPoolExecutor(max_workers=7)`: similar search, prices, corr stats, PCR, insider, fundamentals, options structure. |
 | `invalidate_tools_cache` | `(ticker) → None` | Removes ticker's entry from `_tools_cache`. Called by `data.py` when sync completes so the next analysis sees fresh data. |
 | `_build_chart_data` | `(ticker, tool_data) → dict` | Builds single-ticker chart payload: `{mode: "single", tickers, prices: {ticker: [{date, close}]}, sentiment: {ticker: [{date, avg_score, count}]}}`. Calls `get_daily_sentiment()` for 7-day sentiment. |
 | `_build_comparison_chart_data` | `(ticker_a, ticker_b, data_a, data_b) → dict` | Builds comparison chart payload: `{mode: "comparison", tickers, prices: {...}, sentiment: {...}}`. Frontend normalizes prices to % change from day 1. |
@@ -181,9 +194,13 @@ Standalone Zoom AI Agent client. Also defines shared response types used project
 
 ### `agent/prompts.py`
 
-Contains `ANALYSIS_PROMPT` — the single template injected with all tool data before sending to LLM.
+Contains `ANALYSIS_PROMPT` and `COMPARISON_PROMPT` — templates injected with all tool data before sending to LLM.
 
-**Template variables:** `{ticker}`, `{reply_language}`, `{news_json}`, `{similar_json}`, `{prices_json}`, `{corr_json}`, `{pcr_json}`, `{insider_json}`
+**`ANALYSIS_PROMPT` template variables:** `{ticker}`, `{reply_language}`, `{news_json}`, `{similar_json}`, `{prices_json}`, `{corr_json}`, `{fundamentals_json}`, `{pcr_json}`, `{options_structure_json}`, `{insider_json}`
+
+**Analysis output sections (in order):** Fundamental Snapshot → Current News Summary → Options Market Signal (PCR + Max Pain + GEX) → Insider Activity → Historical Analogues → Price Momentum → Trend Inference → Caveats
+
+**`COMPARISON_PROMPT` template variables:** `{ticker_a}`, `{ticker_b}`, `{reply_language}`, `{news_a/b_json}`, `{prices_a/b_json}`, `{corr_a/b_json}`, `{pcr_a/b_json}`, `{insider_a/b_json}`
 
 **Language control:** `reply_language` is injected at the **end** of the prompt (after all data) as a `CRITICAL INSTRUCTION`. Placing it at the end improves compliance — LLMs tend to follow the last instruction most strongly.
 
@@ -230,9 +247,38 @@ Model: `sentence-transformers/all-MiniLM-L6-v2` (loaded from HuggingFace cache a
 
 ---
 
+### `ingestion/fundamentals/finnhub_fundamentals.py`
+
+`fetch_and_store(ticker: str) → bool` — fetches comprehensive fundamental data from 5 Finnhub endpoints and upserts a `FundamentalSnapshot` row.
+
+| Endpoint | Data |
+|---|---|
+| `/stock/metric?metric=all` | Valuation, profitability, growth, health, market metrics (via `metrics["metric"]` dict) |
+| `/stock/recommendation` | Analyst buy/hold/sell/strong_buy/strong_sell counts (most recent period) |
+| `/stock/price-target` | Mean/high/low analyst price targets |
+| `/stock/earnings?limit=4` | EPS actual/estimate for most recent quarter; computes `eps_surprise_pct` |
+| `/calendar/earnings?from=today&to=today+90d` | Next earnings release date |
+
+Called automatically at the end of every `_run_sync()` (API and CLI sync).
+
+---
+
+### `ingestion/prices/options_structure.py`
+
+`get_options_structure(ticker: str) → dict` — calculates Max Pain and Gamma Exposure for the nearest 2 option expirations using yfinance `option_chain()`. Results cached 1 hour (`_options_cache`, TTL = 3600s).
+
+**Calculations:**
+- **Max Pain:** For each candidate strike K, compute `Σ max(K-s,0)·callOI(s) + Σ max(s-K,0)·putOI(s)` across all strikes. Min K = Max Pain.
+- **GEX (Gamma Exposure):** `Σ(gamma·OI·100·spot)` for calls minus puts. `net_gex > 0` → MMs are long gamma → STABILIZING (dampens moves). `net_gex < 0` → MMs short gamma → AMPLIFYING (accelerates moves).
+- **Key levels:** Top-3 call gamma strikes (overhead resistance) and top-3 put gamma strikes (downside support).
+
+Returns: `{ticker, spot_price, nearest_expiration: {expiration, max_pain, max_pain_distance_pct, gex_available, net_gex_millions, gex_signal, top_call_gamma_strikes, top_put_gamma_strikes}, second_expiration: {...}, summary: str}`
+
+---
+
 ### `scheduler/jobs.py`
 
-`_sync_ticker(ticker)` — incremental-aware sync: detects first run (no price data) vs incremental (overlap by 1 day).
+`_sync_ticker(ticker)` — incremental-aware sync: detects first run (no price data) vs incremental (overlap by 1 day). Runs: prices → news → correlations → embeddings → fundamentals. Same pipeline as `api/routes/data._run_sync()`.
 
 **Important:** `run_scheduler()` uses `BlockingScheduler` — only for CLI `watch` command. The API uses `BackgroundScheduler` (non-blocking), initialized directly in `api/main.py:_start_scheduler()`.
 
@@ -338,6 +384,40 @@ Unique constraint: `(ticker, timestamp, interval)`
 | `magnitude` | Float | Absolute % change |
 
 Unique constraint: `(ticker, news_id)`
+
+### `fundamental_snapshots`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | Integer PK | Auto-increment |
+| `ticker` | String | Uppercase |
+| `fetched_at` | DateTime | UTC, time of Finnhub fetch |
+| `pe_ttm` | Float | Trailing P/E ratio |
+| `pb_quarterly` | Float | Price-to-book (quarterly) |
+| `ps_ttm` | Float | Price-to-sales (TTM) |
+| `ev_ebitda_ttm` | Float | EV/EBITDA (TTM) |
+| `dividend_yield` | Float | Annual dividend yield |
+| `roe_ttm` | Float | Return on equity (TTM) |
+| `roa_ttm` | Float | Return on assets (TTM) |
+| `gross_margin_ttm` | Float | Gross profit margin (TTM) |
+| `operating_margin_ttm` | Float | Operating margin (TTM) |
+| `net_margin_ttm` | Float | Net profit margin (TTM) |
+| `revenue_growth_yoy` | Float | Revenue growth YoY % |
+| `eps_growth_yoy` | Float | EPS growth YoY % |
+| `revenue_growth_3y` | Float | Revenue CAGR 3-year |
+| `eps_growth_3y` | Float | EPS CAGR 3-year |
+| `current_ratio` | Float | Liquidity ratio |
+| `debt_to_equity` | Float | Leverage ratio |
+| `free_cash_flow_ttm` | Float | FCF trailing 12 months (USD) |
+| `week_52_high/low` | Float | 52-week price range |
+| `beta` | Float | Market beta |
+| `market_cap` | Float | Market cap (USD) |
+| `analyst_strong_buy/buy/hold/sell/strong_sell` | Integer | Analyst recommendation counts |
+| `analyst_target_mean/high/low` | Float | Analyst price targets |
+| `eps_actual/estimate` | Float | Most recent quarterly EPS |
+| `eps_surprise_pct` | Float | `(actual - estimate) / abs(estimate) * 100` |
+| `next_earnings_date` | String(20) | ISO date of next earnings release |
+
+Index: `(ticker, fetched_at)`
 
 ---
 

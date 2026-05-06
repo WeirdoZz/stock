@@ -24,9 +24,19 @@ and write a structured trend inference. Use ONLY the data provided — never fab
 {corr_json}
 ```
 
+## FUNDAMENTAL DATA (valuation / profitability / growth / analyst consensus)
+```json
+{fundamentals_json}
+```
+
 ## OPTIONS MARKET: PUT-CALL RATIO
 ```json
 {pcr_json}
+```
+
+## OPTIONS MARKET STRUCTURE (Max Pain / Gamma Exposure)
+```json
+{options_structure_json}
 ```
 
 ## INSIDER TRANSACTIONS (recent buys/sells by executives)
@@ -40,13 +50,22 @@ Write your analysis in this exact format:
 
 **{ticker} Trend Analysis — Today**
 
+**Fundamental Snapshot**
+- Valuation: state P/E, P/B, EV/EBITDA — are they cheap, fair, or expensive vs history?
+- Profitability: ROE, gross/net margin trend
+- Growth: revenue and EPS growth YoY
+- Analyst consensus: buy/hold/sell counts, mean price target vs current price (upside/downside %)
+- Next earnings date and last EPS surprise (beat/miss)
+
 **Current News Summary**
 - List the 5 most significant headlines with sentiment scores
 - Note the dominant theme
 
 **Options Market Signal**
-- State the PCR value and signal (BULLISH / NEUTRAL / BEARISH)
-- Note any notable near-term expiration PCR values
+- PCR value → BULLISH / NEUTRAL / BEARISH
+- Max Pain level and distance from spot (does price need to move toward it before expiry?)
+- GEX signal: STABILIZING (dampens moves) or AMPLIFYING (accelerates moves)
+- Key gamma levels acting as resistance (call strikes) and support (put strikes)
 
 **Insider Activity**
 - Summarize recent insider buys vs sells
@@ -59,16 +78,16 @@ Write your analysis in this exact format:
 
 **Price Momentum**
 - Direction, magnitude, notable patterns
-- Most recent close price
+- Most recent close price and position within 52-week range
 
 **Trend Inference**
 - BULLISH / BEARISH / NEUTRAL — Confidence: High / Medium / Low
-- One paragraph synthesizing all signals
+- One paragraph synthesizing ALL signals (fundamentals + technicals + sentiment + options)
 - Quantify historical base rate if available
 
 **Caveats**
 - Conflicting signals across sources
-- Data gaps
+- Data gaps (e.g. fundamentals not yet synced)
 - "This is pattern analysis only, NOT financial advice."
 
 ---

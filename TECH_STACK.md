@@ -86,7 +86,8 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 ## 数据采集
 
 ### yfinance
-- **用途：** 拉取 OHLCV 历史价格数据（日线 `1d` / 小时线 `1h`）
+- **用途（价格）：** 拉取 OHLCV 历史价格数据（日线 `1d` / 小时线 `1h`）
+- **用途（期权结构）：** `Ticker.option_chain(expiry)` 获取期权链（strike / OI / gamma），计算 Max Pain 和 GEX（无需额外 API Key）
 - **去重：** 数据库 unique constraint `(ticker, timestamp, interval)` 防止重复写入
 
 ### Alpha Vantage API
@@ -95,13 +96,27 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 - **失败处理：** `_safe_fetch()` 包装 — 异常时记 warning 日志，返回 0，不阻断其他数据源
 
 ### Finnhub API
-- **用途：** 新闻文章 + 内部人交易数据（`get_insider_transactions()`）
+- **用途（新闻）：** 新闻文章 + 内部人交易数据（`get_insider_transactions()`）
+- **用途（基本面）：** 5 个端点批量获取 `FundamentalSnapshot`：估值（PE/PB/PS/EV-EBITDA）、盈利能力（ROE/利润率）、成长性（营收/EPS 同比/3年CAGR）、财务健康（流动比率/负债率/FCF）、市场数据（52周高低/Beta/市值）、分析师共识（买卖评级/目标价）、最近一季 EPS 及下次财报日期
 - **Key：** `FINNHUB_API_KEY`
+- **调用时机：** 每次 `_run_sync()` 最后阶段（API sync / CLI sync 均触发）
 - **失败处理：** 同上，独立隔离
 
 ### Financial Juice
 - **用途：** 补充新闻源（最近 48 小时）
 - **失败处理：** 同上，独立隔离
+
+### 期权市场结构（`ingestion/prices/options_structure.py`）
+
+无需额外 API Key，基于 yfinance `option_chain()` 计算两个核心指标：
+
+| 指标 | 计算方式 | 交易含义 |
+|---|---|---|
+| **Max Pain** | 遍历所有行权价 K，使期权买方总内在价值 `Σmax(K-s,0)·callOI + Σmax(s-K,0)·putOI` 最小化 | 理论上到期日前股价向 Max Pain 靠拢（做市商对冲压力） |
+| **GEX（Gamma Exposure）** | `Σ(gamma·OI·100·spot)` calls 减 puts | 正 GEX → 做市商 long gamma → 买跌卖涨 → 压制波动（STABILIZING）；负 GEX → 放大趋势（AMPLIFYING） |
+| **关键 Gamma 水平** | Call gamma 最大的 Top-3 行权价（阻力）；Put gamma 最大的 Top-3 行权价（支撑） | 识别期权市场隐含的价格磁力区 |
+
+覆盖最近 2 个到期日；gamma 列缺失时 `gex_available: false`。
 
 ---
 
@@ -111,11 +126,12 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 
 | 缓存位置 | key | TTL | 作用 |
 |---|---|---|---|
-| `agent/agent.py:_tools_cache` | `ticker` | 20 分钟 | `_run_all_tools` 结果；sync 完成后主动失效 |
+| `agent/agent.py:_tools_cache` | `ticker` | 20 分钟 | `_run_all_tools` 完整结果；sync 完成后主动失效 |
 | `ingestion/prices/options_sentiment.py:_pcr_cache` | `ticker:date` | 6 小时 | PCR 不随日内变化 |
 | `ingestion/news/finnhub_news.py:_insider_cache` | `ticker` | 6 小时 | Insider 交易数据日内稳定 |
+| `ingestion/prices/options_structure.py:_options_cache` | `ticker` | 1 小时 | 期权链下载慢（每次 ~1–2s/到期日）；Max Pain + GEX 小时内基本不变 |
 
-**并行工具采集：** `_collect_tools` 中，news 顺序先跑（subsequent tasks 依赖 headlines），其余 5 个任务（similar search、prices、corr stats、PCR、insider）通过 `ThreadPoolExecutor(max_workers=5)` 并行执行，节省 HTTP 等待时间约 500–1000ms。
+**并行工具采集：** `_collect_tools` 中，news 顺序先跑（subsequent tasks 依赖 headlines），其余 **7 个任务**（similar search、prices、corr stats、PCR、insider、fundamentals、options structure）通过 `ThreadPoolExecutor(max_workers=7)` 并行执行，节省 HTTP 等待时间约 1–2s。
 
 ## 定时任务
 
