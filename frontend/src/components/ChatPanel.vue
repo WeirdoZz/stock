@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue';
+import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { useChatStore } from '../stores/chat';
 import MessageBubble from './MessageBubble.vue';
 import InputBox from './InputBox.vue';
+import HistoryDropdown from './HistoryDropdown.vue';
 
 const chat = useChatStore();
 const scroller = ref<HTMLDivElement | null>(null);
+const inputBox = ref<InstanceType<typeof InputBox> | null>(null);
 
-// Auto-scroll on new messages and on streaming chunks.
 watch(
   () => [chat.messages.length, chat.messages[chat.messages.length - 1]?.text],
   async () => {
@@ -15,14 +16,24 @@ watch(
     if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight;
   },
 );
+
+// Allow other views (e.g., Overview cards) to seed the input via a custom event.
+function onPrefill(e: Event) {
+  const detail = (e as CustomEvent<string>).detail;
+  inputBox.value?.insertTicker(detail.trim());
+}
+
+onMounted(() => document.addEventListener('chat:prefill', onPrefill));
+onBeforeUnmount(() => document.removeEventListener('chat:prefill', onPrefill));
 </script>
 
 <template>
-  <main class="flex flex-col min-w-0">
-    <div ref="scroller" class="flex-1 overflow-y-auto py-6 px-4 flex flex-col gap-4">
+  <aside class="flex flex-col min-w-0 bg-white border-l border-gray-200">
+    <HistoryDropdown />
+    <div ref="scroller" class="flex-1 overflow-y-auto py-4 px-3 flex flex-col gap-3">
       <div v-if="!chat.messages.length" class="text-center text-gray-400 m-auto">
-        <h2 class="text-lg mb-2 text-gray-900">Stock Analysis Agent</h2>
-        <p class="text-sm">Ask about any tracked ticker — e.g. "AAPL 趋势怎么样？"</p>
+        <h2 class="text-sm mb-1 text-gray-700 font-semibold">Stock Analysis Agent</h2>
+        <p class="text-xs">问任意 ticker — 例如「AAPL 趋势怎么样？」</p>
       </div>
       <MessageBubble
         v-for="m in chat.messages"
@@ -30,6 +41,6 @@ watch(
         :message="m"
       />
     </div>
-    <InputBox />
-  </main>
+    <InputBox ref="inputBox" />
+  </aside>
 </template>

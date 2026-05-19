@@ -1,4 +1,7 @@
-import type { TickerStatus, SyncStatus, ChatSessionMeta, PersistedMessage } from '../types';
+import type {
+  TickerStatus, SyncStatus, ChatSessionMeta, PersistedMessage,
+  Plan, PlanInput, OverviewCard,
+} from '../types';
 
 async function jsonOrNull<T>(p: Promise<Response>): Promise<T | null> {
   try {
@@ -55,6 +58,40 @@ export const api = {
 
   getMessages(id: string): Promise<PersistedMessage[]> {
     return jsonOrNull<PersistedMessage[]>(fetch(`/api/sessions/${id}/messages`)).then(r => r ?? []);
+  },
+
+  // ── Plans ─────────────────────────────────────────────────────────────────
+  listPlans(filter: { ticker?: string; status?: string } = {}): Promise<Plan[]> {
+    const params = new URLSearchParams();
+    if (filter.ticker) params.set('ticker', filter.ticker);
+    if (filter.status) params.set('status', filter.status);
+    const qs = params.toString() ? `?${params}` : '';
+    return jsonOrNull<Plan[]>(fetch('/api/plans' + qs)).then(r => r ?? []);
+  },
+
+  createPlan(body: PlanInput): Promise<Plan | null> {
+    return jsonOrNull<Plan>(fetch('/api/plans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  },
+
+  updatePlan(id: number, body: Partial<PlanInput>): Promise<Plan | null> {
+    return jsonOrNull<Plan>(fetch('/api/plans/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  },
+
+  deletePlan(id: number): Promise<{ deleted: number } | null> {
+    return jsonOrNull(fetch('/api/plans/' + id, { method: 'DELETE' }));
+  },
+
+  // ── Overview ──────────────────────────────────────────────────────────────
+  getOverview(): Promise<OverviewCard[]> {
+    return jsonOrNull<OverviewCard[]>(fetch('/api/overview')).then(r => r ?? []);
   },
 
   // Chat itself is streamed via SSE (see composables/useSSE.ts).

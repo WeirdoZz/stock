@@ -52,7 +52,9 @@ stock/
 │   └── routes/
 │       ├── chat.py           # POST /api/chat → SSE stream
 │       ├── data.py           # GET /api/tickers, GET /api/status/{ticker}, POST /api/sync/{ticker}, GET /api/sync/status/{ticker}
-│       └── sessions.py       # GET/POST/PATCH/DELETE /api/sessions[/{id}], GET /api/sessions/{id}/messages
+│       ├── sessions.py       # GET/POST/PATCH/DELETE /api/sessions[/{id}], GET /api/sessions/{id}/messages
+│       ├── plans.py          # GET/POST/PATCH/DELETE /api/plans[/{id}]
+│       └── overview.py       # GET /api/overview
 │
 ├── ingestion/                # External data collection
 │   ├── news/
@@ -323,6 +325,12 @@ Base URL: `http://host:9999`
 | `PATCH` | `/api/sessions/{id}` | Body: `{title?, archived?}`. Updates the session and returns it. 404 if not found. |
 | `DELETE` | `/api/sessions/{id}` | Hard-delete the session and all its messages. |
 | `GET` | `/api/sessions/{id}/messages` | Returns the persisted message log (oldest first). 404 if session missing. |
+| `GET` | `/api/plans` | List holding plans. Query: `?ticker=...&status=...` |
+| `POST` | `/api/plans` | Create plan. Body: `{ticker, action, target_price?, quantity?, target_date?, status?, note?}`. |
+| `GET` | `/api/plans/{id}` | Single plan. 404 if missing. |
+| `PATCH` | `/api/plans/{id}` | Partial update of any field. 404 if missing. |
+| `DELETE` | `/api/plans/{id}` | Remove the plan. 404 if missing. |
+| `GET` | `/api/overview` | One card per registered ticker: latest close + 5d %, 7d news count + avg sentiment, latest PE / 52w / target, pending plan count. |
 
 ### SSE Event Types (`POST /api/chat`)
 
@@ -426,6 +434,22 @@ Unique constraint: `(ticker, news_id)`
 
 Index: `(archived, last_active_at)` for the default-list query.
 
+### `plans`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | Integer PK | Auto-increment |
+| `ticker` | String(10) | Uppercased on write |
+| `action` | String(10) | `'buy'` / `'sell'` / `'hold'` / `'watch'` |
+| `target_price` | Float | Optional |
+| `quantity` | Integer | Optional shares |
+| `target_date` | String(20) | YYYY-MM-DD, optional |
+| `status` | String(20) | `'pending'` (default) / `'completed'` / `'cancelled'` |
+| `note` | Text | Free-form note |
+| `created_at` / `updated_at` | DateTime | UTC; `updated_at` bumped on each PATCH |
+
+Index: `(ticker, status)` for the overview rollup join.
+
 ### `chat_messages`
 
 | Column | Type | Notes |
@@ -516,15 +540,25 @@ Both Zoom and Aliyun backends use `verify=False` in their HTTP clients due to co
 
 Vite + Vue 3 + TypeScript + Tailwind SPA under `frontend/`. Built artefacts in `frontend/dist/` are served by FastAPI; the dev server (`npm run dev`) proxies `/api` to the FastAPI backend on port 9999.
 
-**Layout:** three columns — left ticker sidebar, center chat panel, right
-session history rail (PR 2). The history rail lists past conversations, lets
-the user create new / archive / delete / rename sessions; clicking a row
-hydrates the chat panel from `/api/sessions/{id}/messages`.
+**Layout (PR 3):** three columns — left ticker sidebar, center main area
+(Vue Router: Overview / Plans), right auxiliary chat panel (~400px) with a
+session-history dropdown folded into its header. Right-panel chat is the
+"assistant"; the central views are the user's primary working surface.
 
-**State:** Pinia. Three stores:
-- `stores/tickers.ts` — sidebar state (one row per registered ticker, sync polling timers, register-on-the-fly via SSE).
+**Routing:** `vue-router@4` in hash mode (no FastAPI rewrite rules needed).
+Routes: `/overview` (default) and `/plans`. NavTabs above the router-view
+switches between them.
+
+**State:** Pinia, five stores:
+- `stores/tickers.ts` — left sidebar (registered tickers + sync polling).
 - `stores/chat.ts` — active `session_id`, in-memory message log, streaming flag, hydrate-from-DB.
-- `stores/sessions.ts` — history rail list, `activeId` (persisted in `localStorage`), archive/delete/rename actions.
+- `stores/sessions.ts` — chat session history, `activeId` (persisted in `localStorage`), archive/delete/rename.
+- `stores/plans.ts` — holding plans CRUD + filter state (status/ticker).
+- `stores/overview.ts` — overview cards + last-fetched timestamp.
+
+**Cross-view interaction:** The Overview cards and Plans rows can prime
+the chat input via a `chat:prefill` `CustomEvent` on `document` (caught by
+`ChatPanel.vue`). This avoids store-to-store coupling for one-off UI hops.
 
 **SSE parsing (`composables/useSSE.ts`):**
 Uses `fetch()` + `ReadableStream` (not `EventSource`) because SSE over POST isn't supported by the native EventSource API.

@@ -68,6 +68,28 @@ class CorrelationSnapshot(Base):
     )
 
 
+class Plan(Base):
+    """A user-recorded holding plan: 'I want to buy AAPL at $180 by 2026-06-15'.
+    Independent of registered_tickers — a plan can reference any ticker the
+    user typed in, even one not currently being synced."""
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(10), nullable=False)
+    action = Column(String(10), nullable=False)            # 'buy' | 'sell' | 'hold' | 'watch'
+    target_price = Column(Float)                           # optional target
+    quantity = Column(Integer)                             # optional shares
+    target_date = Column(String(20))                       # YYYY-MM-DD, optional
+    status = Column(String(20), nullable=False, default="pending")  # 'pending' | 'completed' | 'cancelled'
+    note = Column(Text)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_plans_ticker_status", "ticker", "status"),
+    )
+
+
 class ChatSession(Base):
     """Persistent chat conversation. One row per user-visible session in the
     history sidebar. `archived = 1` hides it from the default list without

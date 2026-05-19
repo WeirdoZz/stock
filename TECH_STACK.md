@@ -16,7 +16,7 @@
 | 嵌入模型 | sentence-transformers | ≥ 3.0 |
 | LLM 接入 | Zoom AI / Anthropic / Aliyun DashScope | — |
 | 数据采集 | yfinance, Alpha Vantage API, Finnhub API | — |
-| 前端 | Vue 3 + Vite + TypeScript + Tailwind | Pinia 状态管理 |
+| 前端 | Vue 3 + Vite + TypeScript + Tailwind | Pinia 状态 + Vue Router 4（hash 模式） |
 | 图表 | Chart.js 4 | npm 安装，按需注册 |
 | 定时任务 | APScheduler | ≥ 3.10 |
 
@@ -162,6 +162,7 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 | 包 | 用途 |
 |---|---|
 | `vue` 3.5+ | 组件框架 |
+| `vue-router` 4+ | 路由（`/overview`、`/plans`，hash 模式） |
 | `pinia` 2+ | 全局状态 |
 | `chart.js` 4+ | 价格 / 情感图（按需 `register(...registerables)`） |
 | `marked` 14+ | LLM 输出的 markdown 渲染 |

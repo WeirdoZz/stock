@@ -4,8 +4,114 @@ from sqlalchemy import func, case
 from storage.database import get_session
 from storage.models import (
     NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot,
-    RegisteredTicker, ChatSession, ChatMessage,
+    RegisteredTicker, ChatSession, ChatMessage, Plan,
 )
+
+
+# ── Plans ─────────────────────────────────────────────────────────────────────
+
+VALID_ACTIONS = {"buy", "sell", "hold", "watch"}
+VALID_STATUSES = {"pending", "completed", "cancelled"}
+
+
+def _plan_to_dict(p: Plan) -> dict:
+    return {
+        "id": p.id,
+        "ticker": p.ticker,
+        "action": p.action,
+        "target_price": p.target_price,
+        "quantity": p.quantity,
+        "target_date": p.target_date,
+        "status": p.status,
+        "note": p.note,
+        "created_at": p.created_at.isoformat(),
+        "updated_at": p.updated_at.isoformat(),
+    }
+
+
+def create_plan(
+    ticker: str, action: str,
+    *,
+    target_price: float | None = None,
+    quantity: int | None = None,
+    target_date: str | None = None,
+    status: str = "pending",
+    note: str | None = None,
+) -> dict:
+    if action not in VALID_ACTIONS:
+        raise ValueError(f"invalid action: {action!r}")
+    if status not in VALID_STATUSES:
+        raise ValueError(f"invalid status: {status!r}")
+    with get_session() as s:
+        p = Plan(
+            ticker=ticker.upper(),
+            action=action,
+            target_price=target_price,
+            quantity=quantity,
+            target_date=target_date,
+            status=status,
+            note=note,
+        )
+        s.add(p)
+        s.flush()
+        return _plan_to_dict(p)
+
+
+def list_plans(
+    *,
+    ticker: str | None = None,
+    status: str | None = None,
+) -> list[dict]:
+    with get_session() as s:
+        q = s.query(Plan)
+        if ticker:
+            q = q.filter(Plan.ticker == ticker.upper())
+        if status:
+            q = q.filter(Plan.status == status)
+        rows = q.order_by(Plan.created_at.desc()).all()
+        return [_plan_to_dict(p) for p in rows]
+
+
+def get_plan(plan_id: int) -> dict | None:
+    with get_session() as s:
+        p = s.query(Plan).filter_by(id=plan_id).first()
+        return _plan_to_dict(p) if p else None
+
+
+def update_plan(plan_id: int, **fields) -> dict | None:
+    """Patch one or more fields. Validates action/status if provided."""
+    if "action" in fields and fields["action"] not in VALID_ACTIONS:
+        raise ValueError(f"invalid action: {fields['action']!r}")
+    if "status" in fields and fields["status"] not in VALID_STATUSES:
+        raise ValueError(f"invalid status: {fields['status']!r}")
+    with get_session() as s:
+        p = s.query(Plan).filter_by(id=plan_id).first()
+        if p is None:
+            return None
+        for k, v in fields.items():
+            if hasattr(p, k):
+                setattr(p, k, v)
+        p.updated_at = datetime.utcnow()
+        s.flush()
+        return _plan_to_dict(p)
+
+
+def delete_plan(plan_id: int) -> bool:
+    with get_session() as s:
+        n = s.query(Plan).filter_by(id=plan_id).delete()
+        return n > 0
+
+
+def count_pending_plans_by_ticker() -> dict[str, int]:
+    """Returns {ticker: pending_count} for the overview rollup."""
+    with get_session() as s:
+        rows = (
+            s.query(Plan.ticker, func.count(Plan.id))
+            .filter(Plan.status == "pending")
+            .group_by(Plan.ticker)
+            .all()
+        )
+        return {t: int(n) for t, n in rows}
 
 
 # ── Chat sessions ─────────────────────────────────────────────────────────────
@@ -383,3 +489,80 @@ def get_news_article_by_ids(ids: list[str]) -> list[dict]:
             }
             for r in rows
         ]
+
+
+# ── Overview aggregation ──────────────────────────────────────────────────────
+
+def build_overview_card(ticker: str, pending_plans: int = 0) -> dict:
+    """Compose the per-ticker card payload from existing tables.
+
+    Pulls latest price + 5-day change, 7-day news count and avg sentiment,
+    and the most recent fundamentals snapshot (PE, 52w range, target).
+    Each piece is best-effort; missing data → null fields rather than failure.
+    """
+    ticker = ticker.upper()
+    card: dict = {
+        "ticker": ticker,
+        "current_price": None,
+        "change_5d_pct": None,
+        "last_price_date": None,
+        "news_count_7d": 0,
+        "avg_sentiment_7d": None,
+        "pe_ttm": None,
+        "week_52_high": None,
+        "week_52_low": None,
+        "analyst_target_mean": None,
+        "pending_plans": pending_plans,
+    }
+
+    with get_session() as session:
+        # Latest 6 daily bars → current + 5-trading-day change
+        bars = (
+            session.query(PriceBar)
+            .filter(PriceBar.ticker == ticker, PriceBar.interval == "1d")
+            .order_by(PriceBar.timestamp.desc())
+            .limit(6)
+            .all()
+        )
+        if bars:
+            latest = bars[0]
+            card["current_price"] = latest.close
+            card["last_price_date"] = latest.timestamp.date().isoformat()
+            if len(bars) >= 6 and bars[5].close:
+                card["change_5d_pct"] = round(
+                    (latest.close - bars[5].close) / bars[5].close * 100, 2,
+                )
+
+        # 7-day news rollup
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        news = (
+            session.query(NewsArticle.sentiment_score)
+            .filter(NewsArticle.ticker == ticker, NewsArticle.published_at >= cutoff)
+            .all()
+        )
+        scores = [n[0] for n in news if n[0] is not None]
+        card["news_count_7d"] = len(news)
+        if scores:
+            card["avg_sentiment_7d"] = round(sum(scores) / len(scores), 3)
+
+        # Latest fundamentals snapshot
+        fund = (
+            session.query(FundamentalSnapshot)
+            .filter(FundamentalSnapshot.ticker == ticker)
+            .order_by(FundamentalSnapshot.fetched_at.desc())
+            .first()
+        )
+        if fund:
+            card["pe_ttm"] = fund.pe_ttm
+            card["week_52_high"] = fund.week_52_high
+            card["week_52_low"] = fund.week_52_low
+            card["analyst_target_mean"] = fund.analyst_target_mean
+
+    return card
+
+
+def build_overview() -> list[dict]:
+    """Cards for every registered ticker, in alphabetical order."""
+    tickers = get_registered_tickers()
+    pending = count_pending_plans_by_ticker()
+    return [build_overview_card(t, pending_plans=pending.get(t, 0)) for t in tickers]

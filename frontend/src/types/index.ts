@@ -75,3 +75,45 @@ export interface PersistedMessage {
   chart_json: string | null;
   created_at: string;
 }
+
+// Plans (PR 3)
+export type PlanAction = 'buy' | 'sell' | 'hold' | 'watch';
+export type PlanStatus = 'pending' | 'completed' | 'cancelled';
+
+export interface Plan {
+  id: number;
+  ticker: string;
+  action: PlanAction;
+  target_price: number | null;
+  quantity: number | null;
+  target_date: string | null;
+  status: PlanStatus;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlanInput {
+  ticker: string;
+  action: PlanAction;
+  target_price?: number | null;
+  quantity?: number | null;
+  target_date?: string | null;
+  status?: PlanStatus;
+  note?: string | null;
+}
+
+// Overview (PR 3)
+export interface OverviewCard {
+  ticker: string;
+  current_price: number | null;
+  change_5d_pct: number | null;
+  last_price_date: string | null;
+  news_count_7d: number;
+  avg_sentiment_7d: number | null;
+  pe_ttm: number | null;
+  week_52_high: number | null;
+  week_52_low: number | null;
+  analyst_target_mean: number | null;
+  pending_plans: number;
+}

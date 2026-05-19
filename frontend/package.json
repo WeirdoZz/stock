@@ -14,7 +14,8 @@
     "chart.js": "^4.4.7",
     "marked": "^14.1.4",
     "pinia": "^2.3.0",
-    "vue": "^3.5.13"
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
