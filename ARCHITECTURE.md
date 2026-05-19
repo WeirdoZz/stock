@@ -141,7 +141,7 @@ agent/agent.py: run_query_stream(ticker, reply_language)
 
 ### Data Sync Pipeline
 ```
-Trigger: scheduler (auto on startup) OR CLI sync OR POST /api/sync/{ticker}
+Trigger: scheduler cron OR app-startup freshness check OR CLI sync OR POST /api/sync/{ticker}
   │
   ▼  (status tracked in api/routes/data.py:_sync_status dict when via API)
 ingestion/prices/yfinance_client.py → fetch_and_store()     → PriceBar table
@@ -305,6 +305,8 @@ Returns: `{ticker, spot_price, nearest_expiration: {expiration, max_pain, max_pa
 
 **Important:** `run_scheduler()` uses `BlockingScheduler` — only for CLI `watch` command. The API uses `BackgroundScheduler` (non-blocking), initialized directly in `api/main.py:_start_scheduler()`.
 
+`api/main.py` additionally defines `_expected_latest_trading_date()` (most recent past US weekday, holidays not consulted) and `_kick_startup_freshness_syncs(tickers)`, which compares each ticker's `get_latest_price_date()` against that date and dispatches `_run_sync_tracked()` on a 3-worker thread pool for any that are stale. See § 11 for the full startup sequence.
+
 ---
 
 ## 5. API Reference
@@ -342,7 +344,7 @@ All events are JSON-encoded in `data:` field:
 | `status` | During pipeline | Human-readable progress string |
 | `chunk` | During LLM streaming | Partial text to append to bubble |
 | `chart` | After last chunk, before `done` | JSON string — chart payload `{mode, tickers, prices, sentiment}`; frontend calls `renderCharts()` |
-| `ticker_registered` | When a new ticker is auto-registered via chat (before `chunk`) | The ticker symbol — frontend appends a sidebar row and starts polling sync status |
+| `ticker_registered` | When a new ticker is auto-registered via chat (before `chunk`) | The ticker symbol — frontend calls `overview.load()` so the new ticker appears on the Overview page |
 | `done` | Final event | `""` — triggers final markdown re-render |
 | `error` | On any failure | Error message string |
 
@@ -540,17 +542,19 @@ Both Zoom and Aliyun backends use `verify=False` in their HTTP clients due to co
 
 Vite + Vue 3 + TypeScript + Tailwind SPA under `frontend/`. Built artefacts in `frontend/dist/` are served by FastAPI; the dev server (`npm run dev`) proxies `/api` to the FastAPI backend on port 9999.
 
-**Layout (PR 3):** three columns — left ticker sidebar, center main area
-(Vue Router: Overview / Plans), right auxiliary chat panel (~400px) with a
-session-history dropdown folded into its header. Right-panel chat is the
-"assistant"; the central views are the user's primary working surface.
+**Layout:** two columns — center main area (Vue Router: Overview / Plans),
+right auxiliary chat panel (~400px) with a session-history dropdown folded
+into its header. Right-panel chat is the "assistant"; the central views are
+the user's primary working surface. The Overview page itself lists every
+registered ticker as a card, so a separate left ticker sidebar is no longer
+needed (removed; per-ticker freshness/sync is owned by the backend startup
+hook, see § 11).
 
 **Routing:** `vue-router@4` in hash mode (no FastAPI rewrite rules needed).
 Routes: `/overview` (default) and `/plans`. NavTabs above the router-view
 switches between them.
 
-**State:** Pinia, five stores:
-- `stores/tickers.ts` — left sidebar (registered tickers + sync polling).
+**State:** Pinia, four stores:
 - `stores/chat.ts` — active `session_id`, in-memory message log, streaming flag, hydrate-from-DB.
 - `stores/sessions.ts` — chat session history, `activeId` (persisted in `localStorage`), archive/delete/rename.
 - `stores/plans.ts` — holding plans CRUD + filter state (status/ticker).
@@ -565,13 +569,7 @@ Uses `fetch()` + `ReadableStream` (not `EventSource`) because SSE over POST isn'
 
 **Critical:** `sse-starlette` sends `\r\n\r\n` as event boundaries. The composable normalises `\r\n` → `\n` before splitting on `\n\n`. Do not remove this normalisation.
 
-Event handling matches the API's SSE event types one-for-one (`session`, `status`, `chunk`, `chart`, `ticker_registered`, `done`, `error`); each updates the active assistant message or the tickers store.
-
-**Sidebar (`components/Sidebar.vue`):**
-Each ticker row shows `[ticker] [last sync date / "同步中"] [⟳ sync button]`.
-- Date pulled from `GET /api/status/{ticker}` on first load; red if `days_stale >= 1`, "未同步" (red) if never synced.
-- Clicking ⟳ calls `POST /api/sync/{ticker}`, then polls `GET /api/sync/status/{ticker}` every 2 s until `status != "running"`, then re-fetches `/api/status/{ticker}` to refresh the date.
-- Spin animation (`@keyframes spin`) while running.
+Event handling matches the API's SSE event types one-for-one (`session`, `status`, `chunk`, `chart`, `ticker_registered`, `done`, `error`). On `ticker_registered`, the composable calls `overview.load()` so the new ticker appears as a card without the user needing to refresh.
 
 **Chart rendering (`components/Charts.vue`):**
 Renders inline below an assistant bubble whenever the message has a `chart` payload. Two `<canvas>`es (price + sentiment); destroyed/recreated on prop change.
@@ -626,7 +624,9 @@ PORT=8080 bash start.sh  # custom port
 ### What happens on startup
 1. `init_db()` — creates SQLite tables if they don't exist
 2. `_get_embedder()` — pre-loads sentence-transformers model into RAM
-3. `_start_scheduler()` — starts `BackgroundScheduler` with cron from `SYNC_CRON`
+3. Seed `.env` tickers into the `registered_tickers` table (insert-if-absent), then read the full registered list from DB
+4. `_start_scheduler()` — starts `BackgroundScheduler` with cron from `SYNC_CRON`
+5. `_kick_startup_freshness_syncs(tickers)` — for every registered ticker, compares `get_latest_price_date(ticker)` against the most recent US trading weekday (`_expected_latest_trading_date()`, holidays ignored, weekends rolled back to Friday). Any ticker that is missing data or behind the expected date is queued onto a `ThreadPoolExecutor(max_workers=3)` and run through `_run_sync_tracked(ticker)` in a daemon thread, so server startup does not block. The in-memory `_sync_status` dict is populated as each sync runs, and `invalidate_tools_cache(ticker)` fires per ticker on completion. Result: by the time the app accepts the first chat request, every ticker is being brought up to the latest open session.
 
 ---
 

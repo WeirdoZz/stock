@@ -19,14 +19,6 @@ export interface SyncStatus {
   error?: string | null;
 }
 
-// Per-ticker UI row state
-export interface TickerRowState {
-  ticker: string;
-  lastPriceDate: string | null;
-  daysStale: number | null;
-  syncState: SyncState;
-}
-
 // SSE event types
 export type SSEEvent =
   | { type: 'session'; content: string; session_id: string }

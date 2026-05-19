@@ -141,6 +141,11 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 - **触发器：** `CronTrigger`，cron 表达式来自 `SYNC_CRON`（默认工作日 18:00）
 - **注意：** `BlockingScheduler`（`scheduler/jobs.py`）仅用于 CLI `watch` 命令，API 启动用 `BackgroundScheduler`
 
+### 启动时新鲜度自动同步（`api/main.py`）
+- **用途：** 不等下一次 cron，应用启动后立刻把每个已注册 ticker 的价格刷到"最近一个开盘日"
+- **判定：** `_expected_latest_trading_date()` 取最近的 US 工作日（周末回退到周五，节假日忽略），与 `get_latest_price_date(ticker)` 比较；空或落后即视为 stale
+- **执行：** `concurrent.futures.ThreadPoolExecutor(max_workers=3)` 在 daemon 线程内调用 `_run_sync_tracked(ticker)`，状态写入 in-memory `_sync_status` dict，与手动 `POST /api/sync/{ticker}` 共用一条管线；不阻塞 uvicorn 启动
+
 ---
 
 ## 前端
@@ -150,9 +155,12 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 - **入口：** `frontend/index.html`（仅挂 `<div id="app">`），真正的 UI 在 `frontend/src/`
 - **构建：** Vite 6（`npm run build` 输出到 `frontend/dist/`，由 FastAPI mount `/assets` + 根路径返回 `index.html`）
 - **开发服务器：** `npm run dev`（端口 5173，自动 proxy `/api` → `localhost:9999`）
-- **状态管理：** Pinia 2，两个 store：
-  - `stores/tickers.ts` — 侧边栏 ticker 列表 + sync 轮询定时器
+- **布局：** 两列 — 中间 RouterView（Overview / Plans）+ 右侧 ChatPanel；不再保留左侧 ticker 列表（Overview 页本身就是 ticker 卡片网格）
+- **状态管理：** Pinia 2，四个 store：
   - `stores/chat.ts` — `session_id` + 消息日志 + streaming flag
+  - `stores/sessions.ts` — 会话历史 + `activeId`（持久化到 `localStorage`）
+  - `stores/plans.ts` — 持仓计划 CRUD + 过滤状态
+  - `stores/overview.ts` — Overview 卡片 + 上次抓取时间；`ticker_registered` SSE 事件触发 `overview.load()` 自动刷新
 - **SSE 流式接收：** `composables/useSSE.ts` 用 `fetch()` + `ReadableStream` 解析 `\r\n\r\n` 事件边界
 - **样式：** Tailwind 3 utility 优先；markdown 渲染区域用 `.bubble-md` 自定义类保留 `<h1>/<table>` 等基础样式
 - **TypeScript 严格模式：** `strict: true` + `noUnusedLocals/Parameters`，`vue-tsc -b` 在构建前做类型检查

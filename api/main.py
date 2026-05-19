@@ -82,6 +82,52 @@ def startup():
 
     tickers = get_registered_tickers()
     _start_scheduler(tickers, settings.sync_cron)
+    _kick_startup_freshness_syncs(tickers)
+
+
+def _expected_latest_trading_date():
+    """Most recent past US trading weekday (holidays ignored).
+
+    yfinance returns no bars for weekends, so on Sat/Sun we expect data only
+    through the prior Friday. Used to decide if a ticker's stored prices are
+    behind the latest open session and need a startup sync.
+    """
+    from datetime import datetime, timezone, timedelta
+    d = datetime.now(timezone.utc).date()
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d -= timedelta(days=1)
+    return d
+
+
+def _kick_startup_freshness_syncs(tickers: list) -> None:
+    """For every registered ticker, sync in the background if its latest
+    price bar is older than the most recent US trading day, or missing entirely.
+    Runs off-thread so app startup stays fast."""
+    import threading
+    from storage.repository import get_latest_price_date
+    from api.routes.data import _run_sync_tracked
+
+    expected = _expected_latest_trading_date()
+    stale: list[str] = []
+    for t in tickers:
+        last = get_latest_price_date(t)
+        if last is None or last.date() < expected:
+            stale.append(t)
+
+    if not stale:
+        print(f"[startup] All {len(tickers)} tickers fresh through {expected}.")
+        return
+
+    print(f"[startup] {len(stale)}/{len(tickers)} tickers stale; "
+          f"syncing in background (target={expected}): {stale}")
+
+    def _runner():
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(_run_sync_tracked, stale))
+        print(f"[startup] Freshness sync complete: {stale}")
+
+    threading.Thread(target=_runner, daemon=True, name="startup-freshness-sync").start()
 
 
 def _start_scheduler(tickers: list, cron_expr: str) -> None:

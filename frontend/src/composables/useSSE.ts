@@ -1,6 +1,6 @@
 import type { ChartPayload, ChatMessage, SSEEvent } from '../types';
 import { useChatStore } from '../stores/chat';
-import { useTickersStore } from '../stores/tickers';
+import { useOverviewStore } from '../stores/overview';
 import { useSessionsStore } from '../stores/sessions';
 import { parseSSEBuffer } from '../lib/sse';
 
@@ -59,7 +59,7 @@ export function applyEvent(
  */
 export function useSSE() {
   const chat = useChatStore();
-  const tickers = useTickersStore();
+  const overview = useOverviewStore();
   const sessionsStore = useSessionsStore();
 
   async function send({ message }: SendOptions) {
@@ -75,7 +75,7 @@ export function useSSE() {
         // First message of a brand-new session → tell the history rail to refresh
         if (!previousSessionId) sessionsStore.notePendingActive(id);
       },
-      registerTicker: (t: string) => tickers.registerNew(t),
+      registerTicker: (_t: string) => { overview.load(); },
     };
 
     try {

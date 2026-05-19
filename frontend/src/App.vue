@@ -1,18 +1,14 @@
 <script setup lang="ts">
 import { onMounted } from 'vue';
-import Sidebar from './components/Sidebar.vue';
 import ChatPanel from './components/ChatPanel.vue';
 import NavTabs from './components/NavTabs.vue';
-import { useTickersStore } from './stores/tickers';
 import { useSessionsStore } from './stores/sessions';
 import { useChatStore } from './stores/chat';
 
-const tickers = useTickersStore();
 const sessions = useSessionsStore();
 const chat = useChatStore();
 
 onMounted(async () => {
-  tickers.loadAll();
   await sessions.loadAll();
   if (sessions.activeId && sessions.list.find(s => s.id === sessions.activeId)) {
     await chat.hydrate(sessions.activeId);
@@ -25,9 +21,6 @@ onMounted(async () => {
 
 <template>
   <div class="flex h-full">
-    <!-- Left: ticker list -->
-    <Sidebar />
-
     <!-- Center: tabbed router view (Overview / Plans) -->
     <main class="flex-1 min-w-0 flex flex-col">
       <NavTabs />
