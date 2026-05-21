@@ -221,11 +221,20 @@ def _collect_tools(ticker: str, verbose: bool) -> dict:
         from ingestion.prices.options_structure import get_options_structure
         return "options_structure", get_options_structure(ticker)
 
+    def _macro():
+        from storage.repository import get_macro_latest
+        return "macro", get_macro_latest()
+
+    def _retail():
+        from storage.repository import get_retail_sentiment_summary
+        return "retail_sentiment", get_retail_sentiment_summary(ticker, hours_back=24)
+
     results = {"news": news_result}
-    with ThreadPoolExecutor(max_workers=7) as executor:
+    with ThreadPoolExecutor(max_workers=9) as executor:
         futures = [
             executor.submit(fn)
-            for fn in (_similar, _prices, _corr, _pcr, _insider, _fundamentals, _options_struct)
+            for fn in (_similar, _prices, _corr, _pcr, _insider, _fundamentals,
+                       _options_struct, _macro, _retail)
         ]
         for future in futures:
             key, value = future.result()
@@ -290,7 +299,9 @@ async def _run_query_async(ticker: str, verbose: bool = False, reply_language: s
     prompt = ANALYSIS_PROMPT.format(
         ticker=ticker,
         reply_language=reply_language,
+        macro_json=json.dumps(tool_data.get("macro", {}), indent=2),
         news_json=json.dumps(tool_data["news"], indent=2),
+        retail_json=json.dumps(tool_data.get("retail_sentiment", {}), indent=2),
         similar_json=json.dumps(tool_data["similar"], indent=2),
         prices_json=json.dumps(tool_data["prices"], indent=2),
         corr_json=json.dumps(tool_data["correlation_stats"], indent=2),
@@ -331,7 +342,7 @@ async def run_comparison_stream(ticker_a: str, ticker_b: str,
                 "type": "error",
                 "content": (
                     f"{t} 尚无本地数据，请先同步。\n"
-                    f"点击侧边栏的 ⟳ 按钮，或调用 POST /api/sync/{t}"
+                    f"调用 POST /api/sync/{t}，或重启服务（启动会自动同步所有已注册 ticker）。"
                 ),
             }
             return
@@ -350,12 +361,15 @@ async def run_comparison_stream(ticker_a: str, ticker_b: str,
         ticker_a=ticker_a,
         ticker_b=ticker_b,
         reply_language=reply_language,
+        macro_json=json.dumps(data_a.get("macro", {}), indent=2),
         news_a_json=json.dumps(data_a["news"], indent=2),
+        retail_a_json=json.dumps(data_a.get("retail_sentiment", {}), indent=2),
         prices_a_json=json.dumps(data_a["prices"], indent=2),
         corr_a_json=json.dumps(data_a["correlation_stats"], indent=2),
         pcr_a_json=json.dumps(data_a["put_call_ratio"], indent=2),
         insider_a_json=json.dumps(data_a["insider_transactions"], indent=2),
         news_b_json=json.dumps(data_b["news"], indent=2),
+        retail_b_json=json.dumps(data_b.get("retail_sentiment", {}), indent=2),
         prices_b_json=json.dumps(data_b["prices"], indent=2),
         corr_b_json=json.dumps(data_b["correlation_stats"], indent=2),
         pcr_b_json=json.dumps(data_b["put_call_ratio"], indent=2),
@@ -382,7 +396,7 @@ async def run_query_stream(ticker: str, verbose: bool = False, reply_language: s
             "type": "error",
             "content": (
                 f"{ticker} 尚无本地数据，请先同步。\n"
-                f"点击侧边栏的 ⟳ 按钮，或调用 POST /api/sync/{ticker}"
+                f"调用 POST /api/sync/{ticker}，或重启服务（启动会自动同步所有已注册 ticker）。"
             ),
         }
         return
@@ -395,7 +409,9 @@ async def run_query_stream(ticker: str, verbose: bool = False, reply_language: s
     prompt = ANALYSIS_PROMPT.format(
         ticker=ticker,
         reply_language=reply_language,
+        macro_json=json.dumps(tool_data.get("macro", {}), indent=2),
         news_json=json.dumps(tool_data["news"], indent=2),
+        retail_json=json.dumps(tool_data.get("retail_sentiment", {}), indent=2),
         similar_json=json.dumps(tool_data["similar"], indent=2),
         prices_json=json.dumps(tool_data["prices"], indent=2),
         corr_json=json.dumps(tool_data["correlation_stats"], indent=2),

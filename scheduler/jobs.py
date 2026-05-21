@@ -15,6 +15,7 @@ def _sync_ticker(ticker: str) -> None:
     from storage.repository import get_latest_price_date, get_latest_news_date
     from ingestion.prices.yfinance_client import fetch_and_store as fetch_prices
     from ingestion.news.aggregator import ingest_all_news
+    from ingestion.macro.fred_client import fetch_and_store as fetch_macro
     from analysis.correlator import compute_correlations
     from analysis.embedder import embed_pending
 
@@ -33,6 +34,10 @@ def _sync_ticker(ticker: str) -> None:
         news_from = last_news - timedelta(days=1) if last_news else None
         days_back = max((datetime.utcnow() - last_price).days + 2, 3)
 
+    # Macro is global; ticker-keyed loop is fine because fetch_macro() short-
+    # circuits when data is already fresh (<12h since last fetch).
+    fetch_macro()
+
     p = fetch_prices(ticker, days_back=days_back, interval="1d", from_date=price_from)
     counts = ingest_all_news(ticker, days_back=days_back, from_date=news_from)
     c = compute_correlations(ticker)
@@ -41,7 +46,9 @@ def _sync_ticker(ticker: str) -> None:
     from ingestion.fundamentals.finnhub_fundamentals import fetch_and_store as fetch_fundamentals
     fetch_fundamentals(ticker)
 
-    print(f"  {ticker}: +{p} bars, +{counts['total']} articles, "
+    print(f"  {ticker}: +{p} bars, +{counts['total']} articles "
+          f"(av={counts.get('alpha_vantage',0)}, fj={counts.get('financial_juice',0)}, "
+          f"fh={counts.get('finnhub',0)}, st={counts.get('stocktwits',0)}), "
           f"+{c} correlations, +{e} embeddings")
 
 

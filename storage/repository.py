@@ -4,8 +4,13 @@ from sqlalchemy import func, case
 from storage.database import get_session
 from storage.models import (
     NewsArticle, PriceBar, CorrelationSnapshot, FundamentalSnapshot,
-    RegisteredTicker, ChatSession, ChatMessage, Plan,
+    RegisteredTicker, ChatSession, ChatMessage, Plan, MacroSnapshot,
 )
+
+# StockTwits messages live in news_articles with this marker so we can split
+# professional-news sentiment (used for the chart) from retail sentiment (a
+# separate prompt section).
+RETAIL_SOURCE = "stocktwits"
 
 
 # ── Plans ─────────────────────────────────────────────────────────────────────
@@ -256,6 +261,7 @@ def get_recent_news(ticker: str, hours_back: int = 48) -> list[dict]:
             .filter(
                 NewsArticle.ticker == ticker.upper(),
                 NewsArticle.published_at >= cutoff,
+                NewsArticle.source != RETAIL_SOURCE,
             )
             .order_by(NewsArticle.published_at.desc())
             .limit(50)
@@ -454,7 +460,9 @@ def get_latest_fundamentals(ticker: str) -> dict | None:
 
 
 def get_daily_sentiment(ticker: str, days: int = 7) -> list[dict]:
-    """Return daily aggregated sentiment scores for the past N days."""
+    """Return daily aggregated sentiment scores from professional news only.
+    StockTwits retail signal is intentionally excluded — it's reported in a
+    separate prompt section, not mixed into the headline sentiment chart."""
     cutoff = datetime.utcnow() - timedelta(days=days)
     with get_session() as session:
         rows = (
@@ -463,6 +471,7 @@ def get_daily_sentiment(ticker: str, days: int = 7) -> list[dict]:
                 NewsArticle.ticker == ticker.upper(),
                 NewsArticle.published_at >= cutoff,
                 NewsArticle.sentiment_score.isnot(None),
+                NewsArticle.source != RETAIL_SOURCE,
             )
             .order_by(NewsArticle.published_at.asc())
             .all()
@@ -533,11 +542,15 @@ def build_overview_card(ticker: str, pending_plans: int = 0) -> dict:
                     (latest.close - bars[5].close) / bars[5].close * 100, 2,
                 )
 
-        # 7-day news rollup
+        # 7-day news rollup (professional news only — retail is separate)
         cutoff = datetime.utcnow() - timedelta(days=7)
         news = (
             session.query(NewsArticle.sentiment_score)
-            .filter(NewsArticle.ticker == ticker, NewsArticle.published_at >= cutoff)
+            .filter(
+                NewsArticle.ticker == ticker,
+                NewsArticle.published_at >= cutoff,
+                NewsArticle.source != RETAIL_SOURCE,
+            )
             .all()
         )
         scores = [n[0] for n in news if n[0] is not None]
@@ -566,3 +579,167 @@ def build_overview() -> list[dict]:
     tickers = get_registered_tickers()
     pending = count_pending_plans_by_ticker()
     return [build_overview_card(t, pending_plans=pending.get(t, 0)) for t in tickers]
+
+
+# ── Macro (FRED) ──────────────────────────────────────────────────────────────
+
+def upsert_macro_observations(series_id: str, observations: list[dict]) -> int:
+    """Bulk upsert observations for a single FRED series. Each obs dict:
+    `{"date": date, "value": float}`. Returns count written/updated."""
+    if not observations:
+        return 0
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    now = datetime.utcnow()
+    rows = [
+        {"series_id": series_id, "date": o["date"], "value": o["value"], "fetched_at": now}
+        for o in observations
+        if o.get("value") is not None
+    ]
+    if not rows:
+        return 0
+    with get_session() as session:
+        stmt = sqlite_insert(MacroSnapshot).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["series_id", "date"],
+            set_={"value": stmt.excluded.value, "fetched_at": stmt.excluded.fetched_at},
+        )
+        session.execute(stmt)
+    return len(rows)
+
+
+def get_macro_latest() -> dict:
+    """Return the most recent value of each tracked FRED series, plus a few
+    derived fields (yield curve spread, CPI YoY %). Missing series → null
+    values rather than KeyError. Result schema:
+
+        {
+          "fetched_at": iso str or null,
+          "as_of": iso date str or null,   # latest observation date seen
+          "fed_funds_rate":   {"value": float, "date": iso str} | null,
+          "treasury_10y":     ...,
+          "treasury_2y":      ...,
+          "yield_curve_10y_2y_bps": float | null,   # derived: (10y − 2y) × 100
+          "cpi_index":        ...,
+          "cpi_yoy_pct":      float | null,         # derived: 12m % change
+          "unemployment_pct": ...,
+          "vix":              ...,
+        }
+    """
+    series_map = {
+        "DFF":      "fed_funds_rate",
+        "DGS10":    "treasury_10y",
+        "DGS2":     "treasury_2y",
+        "CPIAUCSL": "cpi_index",
+        "UNRATE":   "unemployment_pct",
+        "VIXCLS":   "vix",
+    }
+    result: dict = {"fetched_at": None, "as_of": None}
+    for key in series_map.values():
+        result[key] = None
+
+    cpi_year_ago = None
+    cpi_now = None
+    latest_obs_date = None
+    latest_fetched = None
+
+    with get_session() as session:
+        for series_id, field in series_map.items():
+            row = (
+                session.query(MacroSnapshot)
+                .filter(MacroSnapshot.series_id == series_id)
+                .order_by(MacroSnapshot.date.desc())
+                .first()
+            )
+            if not row:
+                continue
+            result[field] = {"value": row.value, "date": row.date.isoformat()}
+            if latest_obs_date is None or row.date > latest_obs_date:
+                latest_obs_date = row.date
+            if latest_fetched is None or row.fetched_at > latest_fetched:
+                latest_fetched = row.fetched_at
+            if series_id == "CPIAUCSL":
+                cpi_now = row.value
+                year_ago_cutoff = row.date - timedelta(days=380)
+                year_target = row.date - timedelta(days=365)
+                cpi_year_ago_row = (
+                    session.query(MacroSnapshot)
+                    .filter(
+                        MacroSnapshot.series_id == "CPIAUCSL",
+                        MacroSnapshot.date <= year_target,
+                        MacroSnapshot.date >= year_ago_cutoff,
+                    )
+                    .order_by(MacroSnapshot.date.desc())
+                    .first()
+                )
+                if cpi_year_ago_row:
+                    cpi_year_ago = cpi_year_ago_row.value
+
+    # Derived: yield curve spread (10y − 2y), in basis points
+    t10 = result["treasury_10y"]
+    t2 = result["treasury_2y"]
+    if t10 and t2:
+        result["yield_curve_10y_2y_bps"] = round((t10["value"] - t2["value"]) * 100, 1)
+    else:
+        result["yield_curve_10y_2y_bps"] = None
+
+    # Derived: CPI YoY % change
+    if cpi_now is not None and cpi_year_ago:
+        result["cpi_yoy_pct"] = round((cpi_now - cpi_year_ago) / cpi_year_ago * 100, 2)
+    else:
+        result["cpi_yoy_pct"] = None
+
+    result["as_of"] = latest_obs_date.isoformat() if latest_obs_date else None
+    result["fetched_at"] = latest_fetched.isoformat() if latest_fetched else None
+    return result
+
+
+def get_macro_fetched_at() -> datetime | None:
+    """Most recent `fetched_at` across all macro rows. Used as the staleness
+    check for the global FRED refresh — returns None if no macro data exists."""
+    with get_session() as session:
+        return session.query(func.max(MacroSnapshot.fetched_at)).scalar()
+
+
+# ── Retail sentiment (StockTwits) ─────────────────────────────────────────────
+
+def get_retail_sentiment_summary(ticker: str, hours_back: int = 24) -> dict:
+    """StockTwits message stats for a ticker. Sentiment is mapped at ingest time:
+    Bullish→+0.5, Bearish→−0.5, null→None (uncounted in tone)."""
+    cutoff = datetime.utcnow() - timedelta(hours=hours_back)
+    with get_session() as session:
+        rows = (
+            session.query(NewsArticle)
+            .filter(
+                NewsArticle.ticker == ticker.upper(),
+                NewsArticle.source == RETAIL_SOURCE,
+                NewsArticle.published_at >= cutoff,
+            )
+            .order_by(NewsArticle.published_at.desc())
+            .all()
+        )
+    total = len(rows)
+    bullish = sum(1 for r in rows if (r.sentiment_score or 0) > 0)
+    bearish = sum(1 for r in rows if (r.sentiment_score or 0) < 0)
+    neutral = total - bullish - bearish
+
+    def pct(n):
+        return round(n / total * 100, 1) if total else None
+
+    return {
+        "ticker": ticker.upper(),
+        "window_hours": hours_back,
+        "total": total,
+        "bullish": bullish,
+        "bearish": bearish,
+        "neutral_or_unlabeled": neutral,
+        "bullish_pct": pct(bullish),
+        "bearish_pct": pct(bearish),
+        "sample_messages": [
+            {
+                "text": r.headline[:200],
+                "sentiment": r.sentiment_label,
+                "published_at": r.published_at.isoformat(),
+            }
+            for r in rows[:8]
+        ],
+    }

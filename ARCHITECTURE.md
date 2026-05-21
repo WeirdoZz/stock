@@ -141,14 +141,18 @@ agent/agent.py: run_query_stream(ticker, reply_language)
 
 ### Data Sync Pipeline
 ```
-Trigger: scheduler cron OR app-startup freshness check OR CLI sync OR POST /api/sync/{ticker}
+Trigger: scheduler (auto on startup) OR CLI sync OR POST /api/sync/{ticker}
   │
   ▼  (status tracked in api/routes/data.py:_sync_status dict when via API)
+ingestion/macro/fred_client.py → fetch_and_store()           → MacroSnapshot table
+  └─ Short-circuits when MAX(fetched_at) is < 12h ago. Pulls 6 series:
+     DFF, DGS10, DGS2, CPIAUCSL, UNRATE, VIXCLS.
 ingestion/prices/yfinance_client.py → fetch_and_store()     → PriceBar table
 ingestion/news/aggregator.py → ingest_all_news()            → NewsArticle table
-  ├─ alpha_vantage_news.py  (isolated — failure logs warning, continues)
-  ├─ financial_juice.py     (isolated — failure logs warning, continues)
-  └─ finnhub_news.py        (isolated — failure logs warning, continues)
+  ├─ alpha_vantage_news.py             (isolated — failure logs warning, continues)
+  ├─ financial_juice.py                (isolated — failure logs warning, continues)
+  ├─ finnhub_news.py                   (isolated — failure logs warning, continues)
+  └─ sentiment/stocktwits_client.py    (isolated; source='stocktwits', embedded=1)
 analysis/correlator.py → compute_correlations()             → CorrelationSnapshot table
 analysis/embedder.py → embed_pending()                      → ChromaDB
 ingestion/fundamentals/finnhub_fundamentals.py → fetch_and_store() → FundamentalSnapshot table
@@ -173,7 +177,7 @@ ingestion/fundamentals/finnhub_fundamentals.py → fetch_and_store() → Fundame
 | `run_query_stream` | `async gen (ticker, verbose, reply_language)` | Single-ticker async generator. Yields `status` → `chunks` → `chart` → `done`. Guards against missing data: yields `error` and returns if no price data exists. |
 | `run_comparison_stream` | `async gen (ticker_a, ticker_b, verbose, reply_language)` | Two-ticker comparison. Collects both tickers' data in parallel via `asyncio.gather`, then streams `COMPARISON_PROMPT` to LLM. Yields same event types as `run_query_stream`. |
 | `_run_all_tools` | `(ticker, verbose) → dict` | Cache wrapper (20-min TTL, key = ticker). Returns cached result on hit; calls `_collect_tools` on miss and stores result. |
-| `_collect_tools` | `(ticker, verbose) → dict` | Actual data collection: news fetched first (serial), then 7 tasks run in parallel via `ThreadPoolExecutor(max_workers=7)`: similar search, prices, corr stats, PCR, insider, fundamentals, options structure. |
+| `_collect_tools` | `(ticker, verbose) → dict` | Actual data collection: news fetched first (serial), then 9 tasks run in parallel via `ThreadPoolExecutor(max_workers=9)`: similar search, prices, corr stats, PCR, insider, fundamentals, options structure, **macro** (FRED latest), **retail sentiment** (StockTwits 24h). |
 | `invalidate_tools_cache` | `(ticker) → None` | Removes ticker's entry from `_tools_cache`. Called by `data.py` when sync completes so the next analysis sees fresh data. |
 | `_build_chart_data` | `(ticker, tool_data) → dict` | Builds single-ticker chart payload: `{mode: "single", tickers, prices: {ticker: [{date, close}]}, sentiment: {ticker: [{date, avg_score, count}]}}`. Calls `get_daily_sentiment()` for 7-day sentiment. |
 | `_build_comparison_chart_data` | `(ticker_a, ticker_b, data_a, data_b) → dict` | Builds comparison chart payload: `{mode: "comparison", tickers, prices: {...}, sentiment: {...}}`. Frontend normalizes prices to % change from day 1. |
@@ -211,11 +215,11 @@ Standalone Zoom AI Agent client. Also defines shared response types used project
 
 Contains `ANALYSIS_PROMPT` and `COMPARISON_PROMPT` — templates injected with all tool data before sending to LLM.
 
-**`ANALYSIS_PROMPT` template variables:** `{ticker}`, `{reply_language}`, `{news_json}`, `{similar_json}`, `{prices_json}`, `{corr_json}`, `{fundamentals_json}`, `{pcr_json}`, `{options_structure_json}`, `{insider_json}`
+**`ANALYSIS_PROMPT` template variables:** `{ticker}`, `{reply_language}`, `{macro_json}`, `{news_json}`, `{retail_json}`, `{similar_json}`, `{prices_json}`, `{corr_json}`, `{fundamentals_json}`, `{pcr_json}`, `{options_structure_json}`, `{insider_json}`
 
-**Analysis output sections (in order):** Fundamental Snapshot → Current News Summary → Options Market Signal (PCR + Max Pain + GEX) → Insider Activity → Historical Analogues → Price Momentum → Trend Inference → Caveats
+**Analysis output sections (in order):** Macro Context → Fundamental Snapshot → Current News Summary → Retail Sentiment (StockTwits) → Options Market Signal (PCR + Max Pain + GEX) → Insider Activity → Historical Analogues → Price Momentum → Trend Inference → Caveats
 
-**`COMPARISON_PROMPT` template variables:** `{ticker_a}`, `{ticker_b}`, `{reply_language}`, `{news_a/b_json}`, `{prices_a/b_json}`, `{corr_a/b_json}`, `{pcr_a/b_json}`, `{insider_a/b_json}`
+**`COMPARISON_PROMPT` template variables:** `{ticker_a}`, `{ticker_b}`, `{reply_language}`, `{macro_json}` (global, shared), `{news_a/b_json}`, `{retail_a/b_json}`, `{prices_a/b_json}`, `{corr_a/b_json}`, `{pcr_a/b_json}`, `{insider_a/b_json}`
 
 **Language control:** `reply_language` is injected at the **end** of the prompt (after all data) as a `CRITICAL INSTRUCTION`. Placing it at the end improves compliance — LLMs tend to follow the last instruction most strongly.
 
@@ -305,7 +309,7 @@ Returns: `{ticker, spot_price, nearest_expiration: {expiration, max_pain, max_pa
 
 **Important:** `run_scheduler()` uses `BlockingScheduler` — only for CLI `watch` command. The API uses `BackgroundScheduler` (non-blocking), initialized directly in `api/main.py:_start_scheduler()`.
 
-`api/main.py` additionally defines `_expected_latest_trading_date()` (most recent past US weekday, holidays not consulted) and `_kick_startup_freshness_syncs(tickers)`, which compares each ticker's `get_latest_price_date()` against that date and dispatches `_run_sync_tracked()` on a 3-worker thread pool for any that are stale. See § 11 for the full startup sequence.
+**Macro pre-call:** both `scheduler/jobs.py:_sync_ticker` and `api/routes/data.py:_run_sync` invoke `ingestion.macro.fred_client.fetch_and_store()` before the per-ticker work. The call short-circuits when `get_macro_fetched_at()` is < 12h old, so running it on every ticker in a sync round is cheap after the first.
 
 ---
 
@@ -344,7 +348,7 @@ All events are JSON-encoded in `data:` field:
 | `status` | During pipeline | Human-readable progress string |
 | `chunk` | During LLM streaming | Partial text to append to bubble |
 | `chart` | After last chunk, before `done` | JSON string — chart payload `{mode, tickers, prices, sentiment}`; frontend calls `renderCharts()` |
-| `ticker_registered` | When a new ticker is auto-registered via chat (before `chunk`) | The ticker symbol — frontend calls `overview.load()` so the new ticker appears on the Overview page |
+| `ticker_registered` | When a new ticker is auto-registered via chat (before `chunk`) | The ticker symbol — frontend appends a sidebar row and starts polling sync status |
 | `done` | Final event | `""` — triggers final markdown re-render |
 | `error` | On any failure | Error message string |
 
@@ -389,12 +393,12 @@ SQLite at `data/stock.db`. Managed by SQLAlchemy.
 | `ticker` | String | Uppercase |
 | `headline` | String | |
 | `summary` | Text | |
-| `source` | String | `"alpha_vantage"` / `"finnhub"` |
+| `source` | String | `"alpha_vantage"` / `"finnhub"` / `"financial_juice"` / `"stocktwits"`. Queries that target professional news (`get_daily_sentiment`, `get_recent_news`, `build_overview_card` news rollup) filter out `source='stocktwits'` so retail chatter does not pollute the headline sentiment. |
 | `url` | String | |
 | `published_at` | DateTime | UTC |
 | `sentiment_score` | Float | −1.0 to +1.0 |
 | `sentiment_label` | String | `"Bullish"` / `"Bearish"` / `"Neutral"` |
-| `embedded` | Integer | 0 = not in ChromaDB, 1 = embedded |
+| `embedded` | Integer | 0 = not in ChromaDB, 1 = embedded. StockTwits rows are written with `embedded=1` to skip vector-embedding noisy 280-char chatter. |
 
 Index: `(ticker, published_at)`
 
@@ -509,6 +513,19 @@ Drives `GET /api/tickers`, `_start_scheduler()`, and the comparison/registration
 
 Index: `(ticker, fetched_at)`
 
+### `macro_snapshots`
+
+Global daily macro series from FRED. Not ticker-scoped — every analysis pulls the same row set via `get_macro_latest()`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `series_id` | String(20) PK | FRED series, e.g. `DFF`, `DGS10`, `DGS2`, `CPIAUCSL`, `UNRATE`, `VIXCLS` |
+| `date` | Date PK | Observation date as published by FRED |
+| `value` | Float | Series value at `date` |
+| `fetched_at` | DateTime | UTC. `get_macro_fetched_at()` reads `MAX(fetched_at)` for the 12h freshness gate in `fred_client.is_macro_stale()`. |
+
+Index: `(series_id, date)`. Composite primary key makes upserts idempotent via SQLite's `ON CONFLICT DO UPDATE`.
+
 ---
 
 ## 8. LLM Backends
@@ -542,19 +559,17 @@ Both Zoom and Aliyun backends use `verify=False` in their HTTP clients due to co
 
 Vite + Vue 3 + TypeScript + Tailwind SPA under `frontend/`. Built artefacts in `frontend/dist/` are served by FastAPI; the dev server (`npm run dev`) proxies `/api` to the FastAPI backend on port 9999.
 
-**Layout:** two columns — center main area (Vue Router: Overview / Plans),
-right auxiliary chat panel (~400px) with a session-history dropdown folded
-into its header. Right-panel chat is the "assistant"; the central views are
-the user's primary working surface. The Overview page itself lists every
-registered ticker as a card, so a separate left ticker sidebar is no longer
-needed (removed; per-ticker freshness/sync is owned by the backend startup
-hook, see § 11).
+**Layout (PR 3):** three columns — left ticker sidebar, center main area
+(Vue Router: Overview / Plans), right auxiliary chat panel (~400px) with a
+session-history dropdown folded into its header. Right-panel chat is the
+"assistant"; the central views are the user's primary working surface.
 
 **Routing:** `vue-router@4` in hash mode (no FastAPI rewrite rules needed).
 Routes: `/overview` (default) and `/plans`. NavTabs above the router-view
 switches between them.
 
-**State:** Pinia, four stores:
+**State:** Pinia, five stores:
+- `stores/tickers.ts` — left sidebar (registered tickers + sync polling).
 - `stores/chat.ts` — active `session_id`, in-memory message log, streaming flag, hydrate-from-DB.
 - `stores/sessions.ts` — chat session history, `activeId` (persisted in `localStorage`), archive/delete/rename.
 - `stores/plans.ts` — holding plans CRUD + filter state (status/ticker).
@@ -569,7 +584,13 @@ Uses `fetch()` + `ReadableStream` (not `EventSource`) because SSE over POST isn'
 
 **Critical:** `sse-starlette` sends `\r\n\r\n` as event boundaries. The composable normalises `\r\n` → `\n` before splitting on `\n\n`. Do not remove this normalisation.
 
-Event handling matches the API's SSE event types one-for-one (`session`, `status`, `chunk`, `chart`, `ticker_registered`, `done`, `error`). On `ticker_registered`, the composable calls `overview.load()` so the new ticker appears as a card without the user needing to refresh.
+Event handling matches the API's SSE event types one-for-one (`session`, `status`, `chunk`, `chart`, `ticker_registered`, `done`, `error`); each updates the active assistant message or the tickers store.
+
+**Sidebar (`components/Sidebar.vue`):**
+Each ticker row shows `[ticker] [last sync date / "同步中"] [⟳ sync button]`.
+- Date pulled from `GET /api/status/{ticker}` on first load; red if `days_stale >= 1`, "未同步" (red) if never synced.
+- Clicking ⟳ calls `POST /api/sync/{ticker}`, then polls `GET /api/sync/status/{ticker}` every 2 s until `status != "running"`, then re-fetches `/api/status/{ticker}` to refresh the date.
+- Spin animation (`@keyframes spin`) while running.
 
 **Chart rendering (`components/Charts.vue`):**
 Renders inline below an assistant bubble whenever the message has a `chart` payload. Two `<canvas>`es (price + sentiment); destroyed/recreated on prop change.
@@ -624,9 +645,7 @@ PORT=8080 bash start.sh  # custom port
 ### What happens on startup
 1. `init_db()` — creates SQLite tables if they don't exist
 2. `_get_embedder()` — pre-loads sentence-transformers model into RAM
-3. Seed `.env` tickers into the `registered_tickers` table (insert-if-absent), then read the full registered list from DB
-4. `_start_scheduler()` — starts `BackgroundScheduler` with cron from `SYNC_CRON`
-5. `_kick_startup_freshness_syncs(tickers)` — for every registered ticker, compares `get_latest_price_date(ticker)` against the most recent US trading weekday (`_expected_latest_trading_date()`, holidays ignored, weekends rolled back to Friday). Any ticker that is missing data or behind the expected date is queued onto a `ThreadPoolExecutor(max_workers=3)` and run through `_run_sync_tracked(ticker)` in a daemon thread, so server startup does not block. The in-memory `_sync_status` dict is populated as each sync runs, and `invalidate_tools_cache(ticker)` fires per ticker on completion. Result: by the time the app accepts the first chat request, every ticker is being brought up to the latest open session.
+3. `_start_scheduler()` — starts `BackgroundScheduler` with cron from `SYNC_CRON`
 
 ---
 
@@ -644,6 +663,8 @@ PORT=8080 bash start.sh  # custom port
 | `start.sh` exits silently with no error | `set -e` + `[ -z "$val" ] && cmd` returns 1 when val is set | Use `if [ -z ]; then fi` in bash functions |
 | SFTP file transfers reset mtime | PyCharm SFTP doesn't preserve timestamps | Use md5 hash comparison instead of mtime for dep check |
 | LLM hallucinates data for unsynced tickers | `_run_all_tools()` returns empty arrays; LLM fills gaps with invented data | `run_query_stream()` now checks `get_latest_price_date()` first and yields `type=error` if None |
+| StockTwits retail bullish/bearish polluting the news sentiment chart | All sentiment lived in `news_articles` with no source filter | StockTwits rows are tagged `source='stocktwits'` and excluded by `RETAIL_SOURCE` filter in `get_daily_sentiment` / `get_recent_news` / overview rollup; surfaced separately via `get_retail_sentiment_summary` |
+| Macro fetch hammering FRED on every ticker sync | Per-ticker pipelines all want the same global series | `fred_client.fetch_and_store()` no-ops when `MAX(fetched_at)` is < 12h old |
 | Tools cache serves stale data after sync | 20-min TTL survives sync completion | `invalidate_tools_cache(ticker)` called in `_run_sync_tracked` immediately after sync finishes |
 | Sync fails silently when one news source is down | Any exception in `ingest_all_news()` propagated upward | Each source wrapped in `_safe_fetch()` — failure logs a warning and returns 0, others continue |
 | Sync status lost after server restart | `_sync_status` is in-memory only | Expected behavior; use `GET /api/status/{ticker}` (DB-backed) for persistent data freshness info |

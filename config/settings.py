@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     alpha_vantage_api_key: str = ""
     financial_juice_api_key: str = ""
     finnhub_api_key: str = ""
+    fred_api_key: str = ""           # Federal Reserve Economic Data (free, instant signup)
 
     @property
     def ticker_list(self) -> list[str]:

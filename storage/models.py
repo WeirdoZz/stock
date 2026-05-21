@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    Column, String, Float, Integer, DateTime, Text, Index, UniqueConstraint, BigInteger
+    Column, String, Float, Integer, DateTime, Date, Text, Index, UniqueConstraint, BigInteger
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -191,4 +191,21 @@ class FundamentalSnapshot(Base):
 
     __table_args__ = (
         Index("ix_fundamental_ticker_date", "ticker", "fetched_at"),
+    )
+
+
+class MacroSnapshot(Base):
+    """Daily macro time-series from FRED. One row per (series_id, observation_date).
+    Series are global (not per-ticker). `_sync_macro()` upserts the latest
+    observations once per day; analysis reads the most recent value per series
+    via `get_macro_latest()`."""
+    __tablename__ = "macro_snapshots"
+
+    series_id = Column(String(20), primary_key=True)   # e.g. "DFF", "DGS10", "CPIAUCSL"
+    date = Column(Date, primary_key=True)              # observation date
+    value = Column(Float, nullable=False)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_macro_series_date", "series_id", "date"),
     )

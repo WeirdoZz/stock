@@ -107,6 +107,21 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 - **用途：** 补充新闻源（最近 48 小时）
 - **失败处理：** 同上，独立隔离
 
+### FRED（Federal Reserve Economic Data）
+- **用途：** 拉宏观时序进 `macro_snapshots` 表，给每次分析提供 Macro Context 段（利率/收益率曲线/CPI/失业率/VIX）
+- **Series：** `DFF`、`DGS10`、`DGS2`、`CPIAUCSL`、`UNRATE`、`VIXCLS`
+- **Key：** `FRED_API_KEY`（免费，秒注册：https://fred.stlouisfed.org/docs/api/api_key.html）。未配置时静默跳过，prompt 里 macro_json 为空，LLM 会在 Caveats 里点出
+- **节流：** 12h TTL —— `fred_client.is_macro_stale()` 检查 `MAX(fetched_at)`，每次 ticker sync 均预调用但实际命中 API 的频率上限是 2 次/天
+- **派生字段：** `get_macro_latest()` 计算 `yield_curve_10y_2y_bps`（10Y−2Y 利差，单位 bp）和 `cpi_yoy_pct`（12 个月 CPI 同比）
+
+### StockTwits（散户情感）
+- **用途：** 拉公开消息流（最近 30 条），按 24h 窗口聚合 bullish/bearish 占比，用作 Retail Sentiment 段的低权重参考信号
+- **端点：** `api.stocktwits.com/api/2/streams/symbol/{TICKER}.json`，**无需 auth**
+- **存储位置：** 复用 `news_articles` 表，`source='stocktwits'` 作为分流 marker
+- **Sentiment 映射：** `entities.sentiment.basic = "Bullish"→+0.5 / "Bearish"→−0.5 / null→None`（数值取 0.5 而非 1.0，避免散户置信压过专业新闻）
+- **Embedding：** 写入时 `embedded=1`，跳过向量化（短文本噪音大，污染 historical-analogue 检索）
+- **隔离查询：** `get_daily_sentiment` / `get_recent_news` / `build_overview_card` 的新闻聚合统一加 `source != 'stocktwits'` 过滤；`get_retail_sentiment_summary()` 反向只查 stocktwits
+
 ### 期权市场结构（`ingestion/prices/options_structure.py`）
 
 无需额外 API Key，基于 yfinance `option_chain()` 计算两个核心指标：
@@ -132,7 +147,7 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 | `ingestion/news/finnhub_news.py:_insider_cache` | `ticker` | 6 小时 | Insider 交易数据日内稳定 |
 | `ingestion/prices/options_structure.py:_options_cache` | `ticker` | 1 小时 | 期权链下载慢（每次 ~1–2s/到期日）；Max Pain + GEX 小时内基本不变 |
 
-**并行工具采集：** `_collect_tools` 中，news 顺序先跑（subsequent tasks 依赖 headlines），其余 **7 个任务**（similar search、prices、corr stats、PCR、insider、fundamentals、options structure）通过 `ThreadPoolExecutor(max_workers=7)` 并行执行，节省 HTTP 等待时间约 1–2s。
+**并行工具采集：** `_collect_tools` 中，news 顺序先跑（subsequent tasks 依赖 headlines），其余 **9 个任务**（similar search、prices、corr stats、PCR、insider、fundamentals、options structure、macro、retail sentiment）通过 `ThreadPoolExecutor(max_workers=9)` 并行执行，节省 HTTP 等待时间约 1–2s。Macro 和 retail 都读 DB（不走 HTTP），sync pipeline 已把上游写入做掉了。
 
 ## 定时任务
 
@@ -140,11 +155,6 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 - **用途：** 在 FastAPI 进程内后台定时执行 sync 任务
 - **触发器：** `CronTrigger`，cron 表达式来自 `SYNC_CRON`（默认工作日 18:00）
 - **注意：** `BlockingScheduler`（`scheduler/jobs.py`）仅用于 CLI `watch` 命令，API 启动用 `BackgroundScheduler`
-
-### 启动时新鲜度自动同步（`api/main.py`）
-- **用途：** 不等下一次 cron，应用启动后立刻把每个已注册 ticker 的价格刷到"最近一个开盘日"
-- **判定：** `_expected_latest_trading_date()` 取最近的 US 工作日（周末回退到周五，节假日忽略），与 `get_latest_price_date(ticker)` 比较；空或落后即视为 stale
-- **执行：** `concurrent.futures.ThreadPoolExecutor(max_workers=3)` 在 daemon 线程内调用 `_run_sync_tracked(ticker)`，状态写入 in-memory `_sync_status` dict，与手动 `POST /api/sync/{ticker}` 共用一条管线；不阻塞 uvicorn 启动
 
 ---
 
@@ -155,12 +165,9 @@ async def stream_complete(messages, system_prompt, tools)  # async generator →
 - **入口：** `frontend/index.html`（仅挂 `<div id="app">`），真正的 UI 在 `frontend/src/`
 - **构建：** Vite 6（`npm run build` 输出到 `frontend/dist/`，由 FastAPI mount `/assets` + 根路径返回 `index.html`）
 - **开发服务器：** `npm run dev`（端口 5173，自动 proxy `/api` → `localhost:9999`）
-- **布局：** 两列 — 中间 RouterView（Overview / Plans）+ 右侧 ChatPanel；不再保留左侧 ticker 列表（Overview 页本身就是 ticker 卡片网格）
-- **状态管理：** Pinia 2，四个 store：
+- **状态管理：** Pinia 2，两个 store：
+  - `stores/tickers.ts` — 侧边栏 ticker 列表 + sync 轮询定时器
   - `stores/chat.ts` — `session_id` + 消息日志 + streaming flag
-  - `stores/sessions.ts` — 会话历史 + `activeId`（持久化到 `localStorage`）
-  - `stores/plans.ts` — 持仓计划 CRUD + 过滤状态
-  - `stores/overview.ts` — Overview 卡片 + 上次抓取时间；`ticker_registered` SSE 事件触发 `overview.load()` 自动刷新
 - **SSE 流式接收：** `composables/useSSE.ts` 用 `fetch()` + `ReadableStream` 解析 `\r\n\r\n` 事件边界
 - **样式：** Tailwind 3 utility 优先；markdown 渲染区域用 `.bubble-md` 自定义类保留 `<h1>/<table>` 等基础样式
 - **TypeScript 严格模式：** `strict: true` + `noUnusedLocals/Parameters`，`vue-tsc -b` 在构建前做类型检查
